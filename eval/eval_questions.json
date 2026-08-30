@@ -1,0 +1,249 @@
+[
+  {
+    "id": "checkable_actor_elba",
+    "category": "checkable",
+    "query": "What movies with Idris Elba have I watched?",
+    "expected_tools": ["filter_by_actor"],
+    "grading": "auto_exact_set",
+    "ground_truth": [
+      {"film_id": 10195, "title": "Thor", "year": 2011},
+      {"film_id": 76338, "title": "Thor: The Dark World", "year": 2013},
+      {"film_id": 269149, "title": "Zootopia", "year": 2016},
+      {"film_id": 284053, "title": "Thor: Ragnarok", "year": 2017},
+      {"film_id": 436969, "title": "The Suicide Squad", "year": 2021},
+      {"film_id": 616037, "title": "Thor: Love and Thunder", "year": 2022},
+      {"film_id": 1084242, "title": "Zootopia 2", "year": 2025}
+    ],
+    "notes": "Single structured tool, moderate-size result set."
+  },
+  {
+    "id": "checkable_director_nolan",
+    "category": "checkable",
+    "query": "What Christopher Nolan movies have I watched?",
+    "expected_tools": ["filter_by_director"],
+    "grading": "auto_exact_set",
+    "ground_truth": [
+      {"film_id": 155, "title": "The Dark Knight", "year": 2008},
+      {"film_id": 49026, "title": "The Dark Knight Rises", "year": 2012},
+      {"film_id": 157336, "title": "Interstellar", "year": 2014},
+      {"film_id": 1368337, "title": "The Odyssey", "year": 2026}
+    ],
+    "notes": "Single structured tool."
+  },
+  {
+    "id": "checkable_director_coogler",
+    "category": "checkable",
+    "query": "What Ryan Coogler movies have I watched?",
+    "expected_tools": ["filter_by_director"],
+    "grading": "auto_exact_set",
+    "ground_truth": [
+      {"film_id": 284054, "title": "Black Panther", "year": 2018},
+      {"film_id": 505642, "title": "Black Panther: Wakanda Forever", "year": 2022},
+      {"film_id": 1233413, "title": "Sinners", "year": 2025}
+    ],
+    "notes": "Small result set, easy exact check."
+  },
+  {
+    "id": "checkable_genre_western",
+    "category": "checkable",
+    "query": "What westerns have I watched?",
+    "expected_tools": ["filter_by_genre"],
+    "grading": "auto_exact_set",
+    "ground_truth": [
+      {"film_id": 68718, "title": "Django Unchained", "year": 2012},
+      {"film_id": 273248, "title": "The Hateful Eight", "year": 2015},
+      {"film_id": 44896, "title": "Rango", "year": 2011}
+    ],
+    "notes": "Small genre bucket."
+  },
+  {
+    "id": "checkable_genre_war",
+    "category": "checkable",
+    "query": "What war movies have I watched?",
+    "expected_tools": ["filter_by_genre"],
+    "grading": "auto_exact_set",
+    "ground_truth": [
+      {"film_id": 281338, "title": "War for the Planet of the Apes", "year": 2017},
+      {"film_id": 597922, "title": "The Greatest Beer Run Ever", "year": 2022}
+    ],
+    "notes": "Smallest genre bucket -- only 2 films."
+  },
+  {
+    "id": "checkable_rating_low",
+    "category": "checkable",
+    "query": "What movies have I rated 2.0 stars or lower?",
+    "expected_tools": ["filter_by_rating"],
+    "grading": "auto_exact_set",
+    "ground_truth": [
+      {"film_id": 987917, "title": "Old Dads", "year": 2023},
+      {"film_id": 297761, "title": "Suicide Squad", "year": 2016},
+      {"film_id": 1072790, "title": "Anyone But You", "year": 2023},
+      {"film_id": 520023, "title": "Bodies Bodies Bodies", "year": 2022},
+      {"film_id": 889737, "title": "Joker: Folie à Deux", "year": 2024},
+      {"film_id": 1032823, "title": "Trap", "year": 2024}
+    ],
+    "notes": "Rating filter, low end of the scale."
+  },
+  {
+    "id": "checkable_rating_perfect",
+    "category": "checkable",
+    "query": "What movies did I rate a perfect 5.0?",
+    "expected_tools": ["filter_by_rating"],
+    "grading": "auto_exact_set",
+    "ground_truth": [
+      {"film_id": 496243, "title": "Parasite", "year": 2019},
+      {"film_id": 157336, "title": "Interstellar", "year": 2014},
+      {"film_id": 313369, "title": "La La Land", "year": 2016},
+      {"film_id": 244786, "title": "Whiplash", "year": 2014},
+      {"film_id": 419430, "title": "Get Out", "year": 2017},
+      {"film_id": 687163, "title": "Project Hail Mary", "year": 2026},
+      {"film_id": 1368337, "title": "The Odyssey", "year": 2026},
+      {"film_id": 1325734, "title": "The Drama", "year": 2026},
+      {"film_id": 212778, "title": "Chef", "year": 2014},
+      {"film_id": 1726, "title": "Iron Man", "year": 2008},
+      {"film_id": 299536, "title": "Avengers: Infinity War", "year": 2018},
+      {"film_id": 299534, "title": "Avengers: Endgame", "year": 2019},
+      {"film_id": 155, "title": "The Dark Knight", "year": 2008},
+      {"film_id": 493922, "title": "Hereditary", "year": 2018},
+      {"film_id": 354912, "title": "Coco", "year": 2017}
+    ],
+    "notes": "Rating filter, larger result set (15 films)."
+  },
+  {
+    "id": "checkable_cross_favreau",
+    "category": "checkable",
+    "query": "Every watched film involving Jon Favreau, whether acting or directing.",
+    "expected_tools": ["cross_reference"],
+    "grading": "auto_exact_set",
+    "ground_truth": [
+      {"film_id": 1726, "title": "Iron Man", "year": 2008},
+      {"film_id": 10138, "title": "Iron Man 2", "year": 2010},
+      {"film_id": 106646, "title": "The Wolf of Wall Street", "year": 2013},
+      {"film_id": 68721, "title": "Iron Man 3", "year": 2013},
+      {"film_id": 212778, "title": "Chef", "year": 2014},
+      {"film_id": 315635, "title": "Spider-Man: Homecoming", "year": 2017},
+      {"film_id": 429617, "title": "Spider-Man: Far From Home", "year": 2019},
+      {"film_id": 634649, "title": "Spider-Man: No Way Home", "year": 2021},
+      {"film_id": 533535, "title": "Deadpool & Wolverine", "year": 2024}
+    ],
+    "notes": "cross_reference over filter_by_actor/director -- must dedupe Chef (appears in both roles)."
+  },
+  {
+    "id": "checkable_compound_comedy_high",
+    "category": "checkable",
+    "query": "Which comedies did I rate 4.5 or higher?",
+    "expected_tools": ["filter_by_genre"],
+    "grading": "auto_genre_rating_threshold",
+    "min_rating": 4.5,
+    "ground_truth": [
+      {"film_id": 313369, "title": "La La Land", "year": 2016},
+      {"film_id": 1325734, "title": "The Drama", "year": 2026},
+      {"film_id": 212778, "title": "Chef", "year": 2014},
+      {"film_id": 496243, "title": "Parasite", "year": 2019},
+      {"film_id": 293660, "title": "Deadpool", "year": 2016},
+      {"film_id": 383498, "title": "Deadpool 2", "year": 2018},
+      {"film_id": 10189, "title": "Pineapple Express", "year": 2008},
+      {"film_id": 701387, "title": "Bugonia", "year": 2025},
+      {"film_id": 72105, "title": "Ted", "year": 2012},
+      {"film_id": 106646, "title": "The Wolf of Wall Street", "year": 2013},
+      {"film_id": 19913, "title": "(500) Days of Summer", "year": 2009},
+      {"film_id": 343668, "title": "Kingsman: The Golden Circle", "year": 2017},
+      {"film_id": 50646, "title": "Crazy, Stupid, Love.", "year": 2011},
+      {"film_id": 22538, "title": "Scott Pilgrim vs. the World", "year": 2010}
+    ],
+    "notes": "filter_by_genre alone answers this -- it returns my_rating on every row, so the agent can filter by rating itself off one call. Originally required filter_by_rating too (auto_intersection), but that made a single-call correct answer grade as wrong. Graded with auto_genre_rating_threshold: filters filter_by_genre's own result by my_rating >= min_rating."
+  },
+  {
+    "id": "checkable_chain_western_jackson",
+    "category": "checkable",
+    "query": "Which Western movies have I watched with Samuel L. Jackson in them?",
+    "expected_tools": ["filter_by_actor", "filter_by_genre"],
+    "grading": "auto_intersection",
+    "ground_truth": [
+      {"film_id": 68718, "title": "Django Unchained", "year": 2012},
+      {"film_id": 273248, "title": "The Hateful Eight", "year": 2015}
+    ],
+    "notes": "Added to replace checkable_compound_comedy_high as the suite's chaining question -- unlike that one, no single tool call can answer this (filter_by_actor returns every Samuel L. Jackson film across all genres, filter_by_genre returns every Western regardless of cast), so the agent must call both and intersect the results itself. Verified against films_enriched.json: 8 SLJ films total, 3 Westerns total, exactly 2 in both."
+  },
+  {
+    "id": "fuzzy_uneasy",
+    "category": "fuzzy",
+    "query": "What have I watched that felt uneasy or unsettling?",
+    "expected_tools": ["search_my_history"],
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Vibe/mood question, no fixed answer -- graded by Rohan."
+  },
+  {
+    "id": "fuzzy_found_family",
+    "category": "fuzzy",
+    "query": "What have I watched that's really about found family?",
+    "expected_tools": ["search_my_history"],
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Thematic question."
+  },
+  {
+    "id": "fuzzy_rec_sinners",
+    "category": "fuzzy",
+    "query": "Recommend something like Sinners that I haven't seen yet.",
+    "expected_tools": ["search_tmdb", "tmdb_recommendations"],
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Two-step TMDB chain -- check the model actually excludes already_watched candidates."
+  },
+  {
+    "id": "fuzzy_rec_dark_knight",
+    "category": "fuzzy",
+    "query": "Recommend something like The Dark Knight that I haven't watched.",
+    "expected_tools": ["search_tmdb", "tmdb_recommendations"],
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Should exclude Nolan's own already-watched sequels/related films."
+  },
+  {
+    "id": "fuzzy_surprised",
+    "category": "fuzzy",
+    "query": "What's something in my history that surprised me with how much I ended up loving it?",
+    "expected_tools": ["search_my_history"],
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Subjective, tests reasoning quality over raw retrieval."
+  },
+  {
+    "id": "fuzzy_rec_parasite",
+    "category": "fuzzy",
+    "query": "Recommend something like Parasite that I haven't seen.",
+    "expected_tools": ["search_tmdb", "tmdb_recommendations"],
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Recommendation chain outside the usual blockbuster comfort zone."
+  },
+  {
+    "id": "adversarial_documentaries",
+    "category": "adversarial",
+    "query": "What documentaries have I watched?",
+    "expected_tools": ["filter_by_genre"],
+    "grading": "auto_empty",
+    "ground_truth": [],
+    "notes": "'Documentary' isn't a genre present in the corpus at all -- ground truth is an empty list. Tests honest 'none found' instead of a fabricated or miscategorized answer."
+  },
+  {
+    "id": "adversarial_marvel_ambiguous",
+    "category": "adversarial",
+    "query": "What Marvel movies did I really enjoy?",
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "'Marvel' isn't a genre or any tool parameter -- forces a routing judgment call (likely search_my_history, or several actor/franchise lookups). Graded manually on whether the interpretation is reasonable and nothing is invented."
+  },
+  {
+    "id": "adversarial_duplicate_guard",
+    "category": "adversarial",
+    "query": "Search my history for something with a great plot twist, then run that exact same search again to double-check the results.",
+    "expected_tools": ["search_my_history"],
+    "grading": "auto_duplicate_guard",
+    "ground_truth": null,
+    "notes": "Deliberately instructs a literal repeat -- checks that the step-14 duplicate-call guard actually engages rather than the model just complying and burning an iteration."
+  }
+]

@@ -1,0 +1,24 @@
+# Secrets -- never commit
+.env
+
+# Personal export data + generated pipeline artifacts -- not needed to
+# reproduce or showcase the pipeline; a viewer regenerates these from their
+# own Letterboxd export + API keys via data/build_dataset.py
+data/letterboxd_export/
+data/intermediate/
+data/cache/
+data/chroma_db/
+
+# Private notes -- design/tuning reference kept out of the public repo
+ARCHITECTURE.md
+
+# Debug trace log -- raw per-run tool-call log, not portfolio evidence
+logs/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# macOS
+.DS_Store
