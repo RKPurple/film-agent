@@ -7,7 +7,8 @@
 -- below doesn't strictly matter, but child tables are listed first for
 -- readability.
 --
--- Apply with:  psql entertainmentai -f schema.sql
+-- Apply with:  psql entertainmentai -f pipeline/schema.sql
+-- (pipeline/load_postgres.py applies it automatically on every load.)
 
 DROP TABLE IF EXISTS film_cast CASCADE;
 DROP TABLE IF EXISTS film_crew CASCADE;

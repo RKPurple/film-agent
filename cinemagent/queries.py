@@ -15,21 +15,13 @@ of hybrid retrieval
   while testing now.
 
 Usage (manual smoke test):
-    python3 data/queries.py
+    python -m cinemagent.queries
 """
-
-import sys
-from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from env_config import DB_NAME
+from cinemagent.config import DB_NAME
 
 
 def get_connection(dbname=DB_NAME):

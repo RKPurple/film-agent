@@ -17,11 +17,11 @@ everything done so far is already written to disk and each underlying script
 is cache-aware, so re-running later is cheap.
 
 Usage:
-    python3 data/build_dataset.py
-    python3 data/build_dataset.py --yes      # don't pause between steps (still prints flags)
-    python3 data/build_dataset.py --limit 5  # pass --limit through to enrich + tone (smoke test)
-    python3 data/build_dataset.py --force    # pass --force through to enrich + tone
-    python3 data/build_dataset.py --start 2  # skip straight to step 2 (merge already done)
+    python3 pipeline/build_dataset.py
+    python3 pipeline/build_dataset.py --yes      # don't pause between steps (still prints flags)
+    python3 pipeline/build_dataset.py --limit 5  # pass --limit through to enrich + tone (smoke test)
+    python3 pipeline/build_dataset.py --force    # pass --force through to enrich + tone
+    python3 pipeline/build_dataset.py --start 2  # skip straight to step 2 (merge already done)
 
 Pass-through flags (--limit / --force) only apply to the scripts that accept
 them (steps 2 and 3); merge_letterboxd.py takes neither and is always run as-is.
@@ -31,16 +31,8 @@ import argparse
 import csv
 import subprocess
 import sys
-from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent          # .../data
-SCRIPTS_DIR = DATA_DIR / "data_generation_scripts"   # the three step scripts
-INTERMEDIATE_DIR = DATA_DIR / "intermediate"         # everything they generate
-
-MERGED_CSV = INTERMEDIATE_DIR / "letterboxd_merged.csv"
-SANITY_REPORT = INTERMEDIATE_DIR / "sanity_report.txt"
-ENRICHED_JSON = INTERMEDIATE_DIR / "films_enriched.json"
-UNMATCHED_CSV = INTERMEDIATE_DIR / "unmatched.csv"
+from cinemagent.config import ENRICHED_JSON, MERGED_CSV, PIPELINE_DIR, SANITY_REPORT, UNMATCHED_CSV
 
 
 def rule(char="="):
@@ -50,7 +42,7 @@ def rule(char="="):
 def run_script(script_name, extra_args):
     """Run a pipeline script as a subprocess, streaming its output live.
     Returns the process exit code."""
-    cmd = [sys.executable, str(SCRIPTS_DIR / script_name), *extra_args]
+    cmd = [sys.executable, str(PIPELINE_DIR / script_name), *extra_args]
     print(f"\n$ {' '.join(cmd)}\n")
     return subprocess.run(cmd).returncode
 
@@ -220,7 +212,7 @@ def main():
                   f"{idx + 1} to pick up from the next step.")
             sys.exit(0)
 
-    print("\nDone. Next: python3 data/load_chroma.py "
+    print("\nDone. Next: python3 pipeline/load_chroma.py "
           "(rebuild the Chroma collection so new fields get embedded).")
 
 

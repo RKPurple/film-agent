@@ -20,16 +20,16 @@ against for mood/vibe queries
   "tone_summary" field added to every film record; every other field is
   left untouched. It stays the single source of truth downstream loaders
   read from -- nothing else needs to change to pick this up except
-  load_chroma.py's build_chunk_text(), which gets one new "Tone:" line.
+  cinemagent/chunking.py's build_chunk_text(), which gets one new "Tone:" line.
 
 Usage:
-    python3 data/data_generation_scripts/generate_tone_summaries.py            # full run, cache-aware
-    python3 data/data_generation_scripts/generate_tone_summaries.py --limit 5   # smoke-test on first 5 films
-    python3 data/data_generation_scripts/generate_tone_summaries.py --force     # ignore cache, regenerate everything
+    python3 pipeline/generate_tone_summaries.py            # full run, cache-aware
+    python3 pipeline/generate_tone_summaries.py --limit 5   # smoke-test on first 5 films
+    python3 pipeline/generate_tone_summaries.py --force     # ignore cache, regenerate everything
 
 After this finishes:
-    python3 data/load_chroma.py    # rebuild the Chroma collection so the
-                                   # new "Tone:" line actually gets embedded
+    python3 pipeline/load_chroma.py    # rebuild the Chroma collection so the
+                                       # new "Tone:" line actually gets embedded
 """
 
 import argparse
@@ -37,20 +37,11 @@ import json
 import os
 import sys
 import time
-from pathlib import Path
 
-from openai import OpenAI, RateLimitError
+from google import genai
+from google.genai import errors, types
 
-SCRIPT_DIR = Path(__file__).resolve().parent          # .../data/data_generation_scripts
-DATA_DIR = SCRIPT_DIR.parent                           # .../data
-PROJECT_ROOT = DATA_DIR.parent                         # .../EntertainmentAI
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from env_config import GEMINI_BASE_URL, GEMINI_MODEL, TONE_TEMPERATURE, load_env
-
-ENRICHED_JSON = DATA_DIR / "intermediate" / "films_enriched.json"
-TONE_CACHE_DIR = DATA_DIR / "cache" / "tone"
+from cinemagent.config import ENRICHED_JSON, GEMINI_MODEL, TONE_CACHE_DIR, TONE_TEMPERATURE
 
 # Pause between LLM calls, same spirit as enrich_tmdb.py's
 # REQUEST_SLEEP_SEC for TMDB. This was 13s to stay under the free tier's 5
@@ -60,9 +51,9 @@ TONE_CACHE_DIR = DATA_DIR / "cache" / "tone"
 # hammer it" spirit -- not a real throttle at these limits.
 REQUEST_SLEEP_SEC = 0.1
 
-# On a RateLimitError, pause a full minute and retry the same film. At the
+# On a rate-limit (429) error, pause a full minute and retry the same film. At the
 # free tier's 20 RPD this doubled as a way to detect the daily cap (see the
-# RateLimitError handling below); at tier 1's ~10,000 RPD a 170-film run
+# rate-limit handling below); at tier 1's ~10,000 RPD a 170-film run
 # won't come close to that ceiling, so hitting this now more likely means
 # something transient or a real problem, not "come back tomorrow." Retries
 # bumped back up since they're cheap at this tier and there's less reason
@@ -93,17 +84,21 @@ def build_prompt(film):
 
 
 def generate_tone(client, film):
-    response = client.chat.completions.create(
+    response = client.models.generate_content(
         model=GEMINI_MODEL,
-        messages=[{"role": "user", "content": build_prompt(film)}],
-        temperature=TONE_TEMPERATURE,
+        contents=build_prompt(film),
+        config=types.GenerateContentConfig(temperature=TONE_TEMPERATURE),
     )
-    return response.choices[0].message.content.strip()
+    return response.text.strip()
+
+
+def _is_rate_limited(e):
+    # google-genai has no dedicated rate-limit exception: a 429 surfaces as a
+    # ClientError (its class for every 4xx) whose .code is 429.
+    return isinstance(e, errors.ClientError) and e.code == 429
 
 
 def main():
-    load_env()
-
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N films (for testing)")
     parser.add_argument("--force", action="store_true", help="Ignore cache and regenerate every film's tone summary")
@@ -127,7 +122,7 @@ def main():
     films = all_films[: args.limit] if args.limit else all_films
 
     TONE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    client = OpenAI(api_key=api_key, base_url=GEMINI_BASE_URL)
+    client = genai.Client(api_key=api_key)
 
     n_cached = 0
     n_generated = 0
@@ -151,12 +146,16 @@ def main():
                 try:
                     tone = generate_tone(client, film)
                     break
-                except RateLimitError:
-                    if rl_attempt == RATE_LIMIT_MAX_RETRIES:
+                except errors.ClientError as e:
+                    if not _is_rate_limited(e) or rl_attempt == RATE_LIMIT_MAX_RETRIES:
                         raise
                     print(f"rate limited -- sleeping {RATE_LIMIT_SLEEP_SEC}s then retrying", flush=True)
                     time.sleep(RATE_LIMIT_SLEEP_SEC)
-        except RateLimitError:
+        except Exception as e:
+            if not _is_rate_limited(e):
+                print(f"FAILED ({type(e).__name__}: {e})")
+                n_failed += 1
+                continue
             # Still rate limited after RATE_LIMIT_MAX_RETRIES full 60s
             # waits. At the free tier's 20 RPD this reliably meant the
             # daily cap; at tier 1's ~10,000 RPD a 170-film run won't come
@@ -176,10 +175,6 @@ def main():
             )
             stopped_early = True
             break
-        except Exception as e:
-            print(f"FAILED ({type(e).__name__}: {e})")
-            n_failed += 1
-            continue
 
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump({"tone_summary": tone}, f, indent=2)
@@ -201,7 +196,7 @@ def main():
         )
     elif n_failed:
         print("Re-run the same command to retry only the failed films -- everything else is cached.")
-    print("\nNext: python3 data/load_chroma.py  (rebuild the collection so the new Tone: line gets embedded)")
+    print("\nNext: python3 pipeline/load_chroma.py  (rebuild the collection so the new Tone: line gets embedded)")
 
 
 if __name__ == "__main__":

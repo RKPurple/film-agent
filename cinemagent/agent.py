@@ -7,8 +7,9 @@ How it works:
   client.interactions.create() with the system prompt, current input, and
   TOOL_SCHEMAS; store=True + previous_interaction_id chains turns so Google
   holds conversation state server-side. Execute any function_call steps via
-  tools.py's call_tool(), feed results back as the next input, repeat until
-  the model returns a plain answer or MAX_ITERATIONS (6, a safety cap) hits.
+  cinemagent.tools' call_tool(), feed results back as the next input, repeat until
+  the model returns a plain answer or AGENT_MAX_ITERATIONS (a safety cap,
+  from cinemagent.config) hits.
   SYSTEM_PROMPT carries the which-tool-for-which-question guidance.
 - Citations are title + year (no bracket-number scheme, since one turn may
   combine results from several tools).
@@ -26,22 +27,13 @@ Design notes:
   search_my_history query text -- a literal title match dominates the
   hybrid retrieval's BM25 component and crowds out genuine thematic matches
   (fuzzy_found_family degenerated into a "Guardians of the Galaxy" query).
-
-Usage:
-    python3 agent/agent.py
-    (type a question, press enter, repeat; blank line or "quit" to exit)
 """
 
 import json
-import os
 from datetime import datetime, timezone
 
-from google import genai
-
-from tools import PROJECT_ROOT, TOOL_SCHEMAS, build_tool_context, call_tool, close_tool_context
-from env_config import AGENT_MAX_ITERATIONS, GEMINI_MODEL, load_env
-
-MAX_ITERATIONS = AGENT_MAX_ITERATIONS
+from cinemagent.config import AGENT_MAX_ITERATIONS, GEMINI_MODEL, LOGS_DIR
+from cinemagent.tools import TOOL_SCHEMAS, call_tool
 
 FALLBACK_MESSAGE = (
     "I wasn't able to resolve this in a reasonable number of steps -- "
@@ -73,7 +65,6 @@ def _log_cache_usage(interaction):
 
 # Step 15: one JSON record per run_agent() call, appended (never overwritten)
 # so history accumulates across runs -- see module docstring.
-LOGS_DIR = PROJECT_ROOT / "logs"
 TRACE_LOG_PATH = LOGS_DIR / "agent_traces.jsonl"
 
 SYSTEM_PROMPT = (
@@ -151,7 +142,7 @@ def _write_trace_log(query, steps, iterations, exit_reason, answer):
         print(f"  [trace log write failed: {e}]")
 
 
-def run_agent(query, client, ctx, max_iterations=MAX_ITERATIONS, trace=True, log_trace=True,
+def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS, trace=True, log_trace=True,
               return_trace=False):
     # Step 14: (tool name, canonical-json arguments) pairs already executed
     # this run. First occurrence goes through to call_tool(); any exact
@@ -242,32 +233,3 @@ def run_agent(query, client, ctx, max_iterations=MAX_ITERATIONS, trace=True, log
     if return_trace:
         return FALLBACK_MESSAGE, trace_steps
     return FALLBACK_MESSAGE
-
-
-def main():
-    load_env()
-
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise SystemExit("ERROR: set the GEMINI_API_KEY environment variable first (see module docstring).")
-
-    tmdb_api_key = os.environ.get("TMDB_API_KEY")  # optional -- only needed for search_tmdb
-
-    print("Building tool context (loading models, opening DB connection)...")
-    ctx = build_tool_context(tmdb_api_key=tmdb_api_key)
-    client = genai.Client(api_key=api_key)
-
-    print(f"Ready (model: {GEMINI_MODEL}). Type a question, blank line or 'quit' to exit.\n")
-    try:
-        while True:
-            query = input("agent> ").strip()
-            if not query or query.lower() in ("quit", "exit"):
-                break
-            answer = run_agent(query, client, ctx)
-            print(f"\n{answer}\n")
-    finally:
-        close_tool_context(ctx)
-
-
-if __name__ == "__main__":
-    main()

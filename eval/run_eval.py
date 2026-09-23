@@ -1,28 +1,20 @@
 import argparse
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from google import genai
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-AGENT_DIR = PROJECT_ROOT / "agent"
-for _p in (PROJECT_ROOT, AGENT_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+from cinemagent.agent import run_agent
+from cinemagent.config import GEMINI_MODEL
+from cinemagent.tools import build_tool_context, close_tool_context
 
-from env_config import load_env
-from tools import build_tool_context, close_tool_context
-from agent import run_agent
-from env_config import GEMINI_MODEL
-
-EVAL_DIR = PROJECT_ROOT / "eval"
+EVAL_DIR = Path(__file__).resolve().parent
 QUESTIONS_PATH = EVAL_DIR / "eval_questions.json"
 RESULTS_DIR = EVAL_DIR / "results"
 
-# Schema knowledge about agent/tools.py's dispatch functions -- which key in
+# Schema knowledge about cinemagent.tools' dispatch functions -- which key in
 # each tool's JSON result holds the film list to grade against. See module
 # docstring.
 RESULT_KEYS = {
@@ -144,8 +136,6 @@ def grade_question(question, trace_steps):
 
 
 def main():
-    load_env()
-
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ids", type=str, default=None,
                          help="Comma-separated question ids to run (default: all 18). Takes priority over --category.")

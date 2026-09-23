@@ -9,12 +9,13 @@ Design notes:
   cross_reference/get_all_genres), adding only argument unpacking and
   JSON-safe output. get_all_genres is a whole-table read so the agent can
   check the exact genre vocabulary before an exact-match filter_by_genre.
-- search_my_history calls retrieve() + confidence filtering only, NOT
-  generate.py's generate_answer(): stacking two LLM calls would make
-  citations survive paraphrasing twice. It returns raw confident matches
-  and leaves all synthesis (including "not in corpus") to the agent.
-- search_tmdb has no prior script. It reuses enrich_tmdb.py's tmdb_get()/
-  fetch_details() but not search_movie() (which requires an exact
+- search_my_history calls cinemagent.retrieval's retrieve() +
+  confident_matches() only -- no LLM call of its own, since stacking two
+  LLM calls would make citations survive paraphrasing twice. It returns raw
+  confident matches and leaves all synthesis (including "not in corpus")
+  to the agent.
+- search_tmdb has no prior script. It reuses cinemagent.tmdb_client's
+  tmdb_get()/fetch_details() but not enrich_tmdb.py's search_movie() (which requires an exact
   release-year match an ad hoc lookup rarely has), using its own looser
   _tmdb_search_by_title(). Results are tagged already_watched for
   "recommend something I haven't seen" scenario.
@@ -25,79 +26,33 @@ Design notes:
   agent.py.
 
 Usage (manual smoke test):
-    python3 agent/tools.py
+    python -m cinemagent.tools
 """
 
 import json
-import math
-import sys
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
-DATA_GEN_DIR = DATA_DIR / "data_generation_scripts"   # enrich_tmdb lives here
-RAG_DIR = PROJECT_ROOT / "rag"
-# Add every directory this module imports from to sys.path explicitly --
-# Python's auto-add of a script's own directory only applies to the script
-# being executed directly, and this module is imported, not run.
-for _p in (PROJECT_ROOT, DATA_DIR, DATA_GEN_DIR, RAG_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-import queries
-from enrich_tmdb import fetch_details, tmdb_get
-from load_chroma import CHROMA_DIR, COLLECTION_NAME, EMBEDDING_MODEL_NAME, ENRICHED_JSON, build_chunk_text
-from search_hybrid import RERANKER_MODEL_NAME, build_bm25_index
-from generate import RERANK_CONFIDENCE_THRESHOLD, retrieve
-
-import chromadb
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from cinemagent import config  # noqa: F401 -- loads .env before the __main__ smoke test reads os.environ
+from cinemagent import queries
+from cinemagent.retrieval import confident_matches, load_retrieval_index, retrieve
+from cinemagent.tmdb_client import fetch_details, tmdb_get
 
 
 class ToolContext:
     """Everything a dispatch function needs, built once per agent run and
     threaded through every call_tool() invocation."""
 
-    def __init__(self, conn, bm25, film_ids, film_lookup, film_texts,
-                 embed_model, collection, cross_encoder, tmdb_api_key=None):
+    def __init__(self, conn, index, tmdb_api_key=None):
         self.conn = conn
-        self.bm25 = bm25
-        self.film_ids = film_ids
-        self.film_lookup = film_lookup          # tmdb_id (str) -> film dict
-        self.film_texts = film_texts             # tmdb_id (str) -> blended chunk text
-        self.embed_model = embed_model
-        self.collection = collection
-        self.cross_encoder = cross_encoder
+        self.index = index                       # cinemagent.retrieval.RetrievalIndex
         self.tmdb_api_key = tmdb_api_key
 
 
 def build_tool_context(tmdb_api_key=None):
-    """Load/open everything once: Postgres connection, BM25 index, embedding
-    model, Chroma collection, reranker. Same models/collection as
-    search_hybrid.py/generate.py, so retrieval behaves identically."""
-    if not ENRICHED_JSON.exists():
-        raise SystemExit(f"ERROR: {ENRICHED_JSON} not found -- run enrich_tmdb.py first.")
-
-    with open(ENRICHED_JSON, encoding="utf-8") as f:
-        films = json.load(f)
-    film_ids = [str(film["tmdb_id"]) for film in films]
-    film_lookup = dict(zip(film_ids, films))
-
-    texts = [build_chunk_text(film) for film in films]
-    film_texts = dict(zip(film_ids, texts))
-
-    bm25 = build_bm25_index(texts)
-
-    embed_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    collection = chroma_client.get_collection(COLLECTION_NAME)
-
-    cross_encoder = CrossEncoder(RERANKER_MODEL_NAME)
-
+    """Load/open everything once: the retrieval index (BM25, embedding model,
+    Chroma collection, reranker) and the Postgres connection."""
+    index = load_retrieval_index()
     conn = queries.get_connection()
-
-    return ToolContext(conn, bm25, film_ids, film_lookup, film_texts,
-                        embed_model, collection, cross_encoder, tmdb_api_key)
+    return ToolContext(conn, index, tmdb_api_key)
 
 
 def close_tool_context(ctx):
@@ -105,7 +60,7 @@ def close_tool_context(ctx):
 
 
 # ---------------------------------------------------------------------------
-# Tool schemas -- handed to the OpenAI-compatible `tools=` parameter as-is.
+# Tool schemas -- handed to the google-genai Interactions API's `tools=` parameter as-is.
 # ---------------------------------------------------------------------------
 
 TOOL_SCHEMAS = [
@@ -305,24 +260,16 @@ def _dispatch_get_all_genres(args, ctx):
     return {"genres": _rows_to_dicts(queries.get_all_genres(ctx.conn))}
 
 
-def _sigmoid(x):
-    return 1.0 / (1.0 + math.exp(-x))
-
-
 def _dispatch_search_my_history(args, ctx):
-    query = args["query"]
-    reranked = retrieve(query, ctx.bm25, ctx.film_ids, ctx.embed_model, ctx.collection,
-                         ctx.cross_encoder, ctx.film_texts)
+    reranked = retrieve(ctx.index, args["query"])
     matches = []
-    for fid, confidence in reranked:
-        if confidence < RERANK_CONFIDENCE_THRESHOLD:
-            continue
-        film = ctx.film_lookup[fid]
+    for fid, confidence in confident_matches(reranked):
+        film = ctx.index.film_lookup[fid]
         matches.append({
             "title": film["title"],
             "year": film.get("year"),
             "confidence": round(confidence, 3),
-            "text": ctx.film_texts[fid],
+            "text": ctx.index.film_texts[fid],
         })
     return {"matches": matches}
 
@@ -361,7 +308,7 @@ def _dispatch_search_tmdb(args, ctx):
         "genres": [g["name"] for g in details.get("genres", [])],
         "directors": [c["name"] for c in credits.get("crew", []) if c.get("job") == "Director"],
         "cast": [c["name"] for c in credits.get("cast", [])[:5]],
-        "already_watched": str(details["id"]) in ctx.film_lookup,
+        "already_watched": str(details["id"]) in ctx.index.film_lookup,
     }
 
 
@@ -438,7 +385,7 @@ def _dispatch_tmdb_recommendations(args, ctx):
             "year": (r.get("release_date") or "")[:4] or None,
             "overview": r.get("overview"),
             "vote_average": r.get("vote_average"),
-            "already_watched": str(r["id"]) in ctx.film_lookup,
+            "already_watched": str(r["id"]) in ctx.index.film_lookup,
         }
         for r in merged
     ]

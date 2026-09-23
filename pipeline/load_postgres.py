@@ -1,6 +1,6 @@
 """
 Load data/intermediate/films_enriched.json into the Postgres schema
-defined in ../schema.sql (films / people / film_cast / film_crew / genres /
+defined in pipeline/schema.sql (films / people / film_cast / film_crew / genres /
 film_genres / keywords / film_keywords).
 
 Design: this script is idempotent BY BEING DESTRUCTIVE, on purpose. Every
@@ -12,27 +12,17 @@ films_enriched.json is the single source of truth, so "wipe and reload" is
 simpler and safer than trying to diff/upsert against a moving JSON file.
 
 Usage:
-    python3 data/load_postgres.py                  # loads into `entertainmentai`
-    python3 data/load_postgres.py --dbname other_db
+    python3 pipeline/load_postgres.py                  # loads into `entertainmentai`
+    python3 pipeline/load_postgres.py --dbname other_db
 """
 
 import argparse
 import json
-import sys
-from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
 
-SCRIPT_DIR = Path(__file__).resolve().parent      # .../EntertainmentAI/data
-PROJECT_ROOT = SCRIPT_DIR.parent                   # .../EntertainmentAI
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from env_config import DB_NAME
-
-ENRICHED_JSON = SCRIPT_DIR / "intermediate" / "films_enriched.json"
-SCHEMA_SQL = PROJECT_ROOT / "schema.sql"
+from cinemagent.config import DB_NAME, ENRICHED_JSON, SCHEMA_SQL
 
 
 def to_float(value):

@@ -3,7 +3,7 @@
 
 # Personal export data + generated pipeline artifacts -- not needed to
 # reproduce or showcase the pipeline; a viewer regenerates these from their
-# own Letterboxd export + API keys via data/build_dataset.py
+# own Letterboxd export + API keys via pipeline/build_dataset.py
 data/letterboxd_export/
 data/intermediate/
 data/cache/
@@ -22,3 +22,9 @@ venv/
 
 # macOS
 .DS_Store
+
+# Personal study notes -- not part of the public repo
+STUDY_GUIDE.md
+
+# Interview prep -- personal, not part of the public repo
+interview_prep.md

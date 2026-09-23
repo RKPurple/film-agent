@@ -22,21 +22,19 @@ watched.csv and is consistent across all five files.
 
 Design note: watched.csv is the master list (every film ever marked
 watched). ratings.csv, diary.csv, and reviews.csv are narrower slices
+
+Usage:
+    python3 pipeline/merge_letterboxd.py
 """
 
 import csv
 from collections import defaultdict
-from pathlib import Path
 
-# This script lives in data/data_generation_scripts/. The raw export sits in
-# data/letterboxd_export/; generated artifacts go to data/intermediate/.
-DATA_DIR = Path(__file__).resolve().parent.parent
-RAW_DIR = DATA_DIR / "letterboxd_export"
-OUT_DIR = DATA_DIR / "intermediate"
+from cinemagent.config import INTERMEDIATE_DIR, LETTERBOXD_EXPORT_DIR, MERGED_CSV, SANITY_REPORT
 
 
 def read_csv(name):
-    path = RAW_DIR / name
+    path = LETTERBOXD_EXPORT_DIR / name
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
@@ -139,18 +137,16 @@ def main():
                      else (latest_review["Tags"] if latest_review else "")),
         })
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_csv = OUT_DIR / "letterboxd_merged.csv"
-    with open(out_csv, "w", newline="", encoding="utf-8") as f:
+    INTERMEDIATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(MERGED_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(merged[0].keys()))
         writer.writeheader()
         writer.writerows(merged)
 
-    report_path = OUT_DIR / "sanity_report.txt"
-    report_path.write_text("\n".join(sanity_lines) + "\n", encoding="utf-8")
+    SANITY_REPORT.write_text("\n".join(sanity_lines) + "\n", encoding="utf-8")
 
-    print(f"Wrote {len(merged)} merged rows -> {out_csv}")
-    print(f"Wrote sanity report -> {report_path}")
+    print(f"Wrote {len(merged)} merged rows -> {MERGED_CSV}")
+    print(f"Wrote sanity report -> {SANITY_REPORT}")
     print()
     print("\n".join(sanity_lines))
 

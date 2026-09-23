@@ -1,9 +1,16 @@
 """
-Hybrid retrieval: vector + BM25 fused via reciprocal rank fusion, then
-cross-encoder reranking.
+cinemagent.retrieval -- hybrid retrieval over the watched-film corpus:
+vector + BM25 fused via reciprocal rank fusion, then cross-encoder
+reranking.
+
+Public entry point: load_retrieval_index() once, then
+retrieve(index, query) -> [(film_id, confidence), ...] per query, and
+confident_matches() to apply RERANK_CONFIDENCE_THRESHOLD.
+retrieve_stages() exposes the intermediate lists (and raw reranker
+scores) for inspection -- see cli/search.py --stages.
 
 - BM25 indexes the SAME blended chunk text Chroma embeds (via
-  build_chunk_text() in load_chroma.py), so comparisons test the
+  build_chunk_text() in cinemagent/chunking.py), so comparisons test the
   retrieval mechanism, not different text.
 - Tokens are lowercased, split on alphanumeric runs, stopword-filtered,
   and stemmed (snowballstemmer) identically at index and query time --
@@ -19,48 +26,37 @@ cross-encoder reranking.
   precomputable, so it only runs over the narrow fused candidate pool.
 - bm25_search() returns only strictly-positive scores: a 0.0 score is
   zero lexical overlap, not a weak match, so it shouldn't pad the fused
-  pool out to N_RESULTS with zero-signal docs in films_enriched.json's
+  pool out to RETRIEVAL_N_RESULTS with zero-signal docs in films_enriched.json's
   arbitrary order. Abstract queries BM25 can't help with (e.g. "found
   family") now lean honestly on vector search alone.
-
-Usage:
-    python3 rag/search_hybrid.py
-    (type a query, press enter, repeat; blank line or "quit" to exit)
+- The reranker emits an unbounded logit; retrieve() passes it through
+  sigmoid to get a 0-1 confidence. confident_matches() keeps only results
+  at or above RERANK_CONFIDENCE_THRESHOLD (0.5, "more likely relevant than
+  not").
 """
 
 import json
+import math
 import re
-import sys
-from pathlib import Path
+from dataclasses import dataclass
 
 import chromadb
 import snowballstemmer
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
-for _p in (PROJECT_ROOT, DATA_DIR):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-from load_chroma import (
+from cinemagent.chunking import QUERY_PREFIX, build_chunk_text
+from cinemagent.config import (
+    CHROMA_COLLECTION_NAME,
     CHROMA_DIR,
-    COLLECTION_NAME,
     EMBEDDING_MODEL_NAME,
     ENRICHED_JSON,
-    QUERY_PREFIX,
-    build_chunk_text,
-)
-from env_config import (
+    RERANK_CONFIDENCE_THRESHOLD,
     RERANK_TOP_N,
     RERANKER_MODEL_NAME,
     RETRIEVAL_N_RESULTS,
     RRF_K,
 )
-
-# Historical name kept for existing importers / call-site defaults below.
-N_RESULTS = RETRIEVAL_N_RESULTS
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 STEMMER = snowballstemmer.stemmer("english")
@@ -107,7 +103,7 @@ def build_bm25_index(texts):
     return BM25Okapi(tokenized_docs)
 
 
-def bm25_search(bm25, film_ids, query, n=N_RESULTS):
+def bm25_search(bm25, film_ids, query, n=RETRIEVAL_N_RESULTS):
     scores = bm25.get_scores(tokenize(query))
     ranked = sorted(zip(film_ids, scores), key=lambda pair: pair[1], reverse=True)
     # Only keep documents BM25 found real lexical signal for -- see the
@@ -117,7 +113,7 @@ def bm25_search(bm25, film_ids, query, n=N_RESULTS):
     return [film_id for film_id, score in ranked[:n] if score > 0]
 
 
-def vector_search(model, collection, query, n=N_RESULTS):
+def vector_search(model, collection, query, n=RETRIEVAL_N_RESULTS):
     # BGE's asymmetric half: queries get the instruction prefix, documents
     # (already embedded in load_chroma.py) never did.
     query_embedding = model.encode(QUERY_PREFIX + query, normalize_embeddings=True).tolist()
@@ -140,9 +136,31 @@ def rerank(cross_encoder, query, candidate_ids, film_texts, top_n=RERANK_TOP_N):
     return ranked[:top_n]
 
 
-def main():
+def sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+@dataclass
+class RetrievalIndex:
+    """Everything retrieval needs, loaded once by load_retrieval_index() and
+    reused across queries."""
+
+    films: list
+    film_ids: list          # tmdb_id (str), in films_enriched.json order -- BM25 row order
+    film_lookup: dict       # tmdb_id (str) -> film dict
+    film_texts: dict        # tmdb_id (str) -> blended chunk text
+    bm25: BM25Okapi
+    embed_model: SentenceTransformer
+    collection: chromadb.Collection
+    cross_encoder: CrossEncoder
+
+
+def load_retrieval_index(verbose=False):
+    """Load films_enriched.json, build the BM25 index, and load the embedding
+    model, Chroma collection and reranker. verbose prints a progress line
+    before each slow step."""
     if not ENRICHED_JSON.exists():
-        raise SystemExit(f"ERROR: {ENRICHED_JSON} not found -- run enrich_tmdb.py first.")
+        raise FileNotFoundError(f"ERROR: {ENRICHED_JSON} not found -- run enrich_tmdb.py first.")
 
     with open(ENRICHED_JSON, encoding="utf-8") as f:
         films = json.load(f)
@@ -152,53 +170,48 @@ def main():
     texts = [build_chunk_text(film) for film in films]
     film_texts = dict(zip(film_ids, texts))
 
-    def describe(film_id):
-        film = film_lookup.get(film_id)
-        return f"{film['title']} ({film.get('year', '?')})" if film else film_id
-
-    print(f"Building BM25 index over {len(films)} films...")
+    if verbose:
+        print(f"Building BM25 index over {len(films)} films...")
     bm25 = build_bm25_index(texts)
 
-    print(f"Loading {EMBEDDING_MODEL_NAME} and '{COLLECTION_NAME}' @ {CHROMA_DIR}...")
-    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    if verbose:
+        print(f"Loading {EMBEDDING_MODEL_NAME} and '{CHROMA_COLLECTION_NAME}' @ {CHROMA_DIR}...")
+    embed_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    collection = client.get_collection(COLLECTION_NAME)
+    collection = client.get_collection(CHROMA_COLLECTION_NAME)
 
-    print(f"Loading reranker {RERANKER_MODEL_NAME}...")
+    if verbose:
+        print(f"Loading reranker {RERANKER_MODEL_NAME}...")
     cross_encoder = CrossEncoder(RERANKER_MODEL_NAME)
 
-    print("Ready. Type a query, blank line or 'quit' to exit.\n")
-
-    while True:
-        query = input("query> ").strip()
-        if not query or query.lower() in ("quit", "exit"):
-            break
-
-        vector_ids = vector_search(model, collection, query)
-        bm25_ids = bm25_search(bm25, film_ids, query)
-        fused = reciprocal_rank_fusion([vector_ids, bm25_ids])
-        reranked = rerank(cross_encoder, query, [fid for fid, _score in fused], film_texts)
-
-        # Intermediary stages (vector-only / bm25-only / fused) are computed
-        # above but no longer printed -- only the final reranked results are
-        # shown. Uncomment to inspect the pipeline stage by stage again.
-        # print("\n-- vector-only --")
-        # for rank, fid in enumerate(vector_ids, 1):
-        #     print(f"  {rank}. {describe(fid)}")
-
-        # print("-- bm25-only --")
-        # for rank, fid in enumerate(bm25_ids, 1):
-        #     print(f"  {rank}. {describe(fid)}")
-
-        # print("-- fused (RRF) --")
-        # for rank, (fid, score) in enumerate(fused, 1):
-        #     print(f"  {rank}. {describe(fid)}  rrf_score={score:.4f}")
-
-        print(f"\n-- reranked (top {RERANK_TOP_N}, cross-encoder) --")
-        for rank, (fid, score) in enumerate(reranked, 1):
-            print(f"  {rank}. {describe(fid)}  rerank_score={score:.4f}")
-        print()
+    return RetrievalIndex(films, film_ids, film_lookup, film_texts,
+                          bm25, embed_model, collection, cross_encoder)
 
 
-if __name__ == "__main__":
-    main()
+@dataclass
+class RetrievalStages:
+    vector_ids: list        # vector-only ranking
+    bm25_ids: list          # BM25-only ranking (strictly-positive scores only)
+    fused: list             # [(film_id, rrf_score), ...]
+    reranked: list          # [(film_id, raw cross-encoder logit), ...]
+
+
+def retrieve_stages(index, query):
+    """Run the full pipeline (vector + BM25 -> RRF -> rerank), keeping every
+    intermediate list. Reranker scores are raw logits, not confidences."""
+    vector_ids = vector_search(index.embed_model, index.collection, query)
+    bm25_ids = bm25_search(index.bm25, index.film_ids, query)
+    fused = reciprocal_rank_fusion([vector_ids, bm25_ids])
+    reranked = rerank(index.cross_encoder, query, [fid for fid, _score in fused], index.film_texts)
+    return RetrievalStages(vector_ids, bm25_ids, fused, reranked)
+
+
+def retrieve(index, query):
+    """Return [(film_id, confidence), ...] sorted by confidence descending,
+    where confidence is the reranker's raw logit passed through sigmoid."""
+    return [(fid, sigmoid(raw_score)) for fid, raw_score in retrieve_stages(index, query).reranked]
+
+
+def confident_matches(reranked, threshold=RERANK_CONFIDENCE_THRESHOLD):
+    """Keep only (film_id, confidence) pairs at or above threshold, in order."""
+    return [(fid, confidence) for fid, confidence in reranked if confidence >= threshold]

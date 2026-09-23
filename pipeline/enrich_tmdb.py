@@ -3,15 +3,15 @@ Enrich each watched film with TMDB metadata
 (cast, crew/director, genres, keywords, synopsis), caching raw responses
 locally so re-runs are cheap and idempotent
 
-Input:  data/intermediate/letterboxd_merged.csv   (from data_generation_scripts/merge_letterboxd.py)
+Input:  data/intermediate/letterboxd_merged.csv   (from pipeline/merge_letterboxd.py)
 Output: data/cache/tmdb/{tmdb_id}.json           -- one raw TMDB API response per film
         data/intermediate/films_enriched.json    -- Letterboxd fields + TMDB fields, one record/film
         data/intermediate/unmatched.csv          -- films TMDB search couldn't confidently resolve
 
 Usage:
-    python3 data/data_generation_scripts/enrich_tmdb.py            # full run
-    python3 data/data_generation_scripts/enrich_tmdb.py --limit 5   # smoke-test on first 5 films
-    python3 data/data_generation_scripts/enrich_tmdb.py --force     # ignore cache, re-fetch everything
+    python3 pipeline/enrich_tmdb.py            # full run
+    python3 pipeline/enrich_tmdb.py --limit 5   # smoke-test on first 5 films
+    python3 pipeline/enrich_tmdb.py --force     # ignore cache, re-fetch everything
 
 Matching strategy: TMDB /search/movie by title, then prefer a candidate
 whose release year matches exactly. If no candidate matches the year,
@@ -25,56 +25,11 @@ import json
 import os
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent          # .../data/data_generation_scripts
-DATA_DIR = SCRIPT_DIR.parent                           # .../data
-PROJECT_ROOT = DATA_DIR.parent                         # .../EntertainmentAI
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from cinemagent.config import ENRICHED_JSON, INTERMEDIATE_DIR, MERGED_CSV, TMDB_CACHE_DIR, UNMATCHED_CSV
+from cinemagent.tmdb_client import fetch_details, tmdb_get
 
-from env_config import load_env
-
-INTERMEDIATE_DIR = DATA_DIR / "intermediate"
-CACHE_DIR = DATA_DIR / "cache" / "tmdb"
-MERGED_CSV = INTERMEDIATE_DIR / "letterboxd_merged.csv"
-ENRICHED_JSON = INTERMEDIATE_DIR / "films_enriched.json"
-UNMATCHED_CSV = INTERMEDIATE_DIR / "unmatched.csv"
-
-TMDB_BASE = "https://api.themoviedb.org/3"
 REQUEST_SLEEP_SEC = 0.1  # be polite; TMDB's limits are generous but no need to hammer it
-MAX_RETRIES = 3
-
-
-def tmdb_get(path, api_key, params=None):
-    """GET a TMDB endpoint with retry/backoff on transient errors and 429s."""
-    params = dict(params or {})
-    params["api_key"] = api_key
-    url = f"{TMDB_BASE}{path}?{urllib.parse.urlencode(params)}"
-
-    last_err = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=15) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                retry_after = int(e.headers.get("Retry-After", "2"))
-                time.sleep(retry_after)
-                last_err = e
-                continue
-            if e.code == 401:
-                raise RuntimeError(
-                    "TMDB returned 401 Unauthorized -- check TMDB_API_KEY is a valid v3 API key."
-                ) from e
-            last_err = e
-        except (urllib.error.URLError, TimeoutError) as e:
-            last_err = e
-        time.sleep(1.5 * attempt)
-    raise RuntimeError(f"TMDB request failed after {MAX_RETRIES} attempts: {url}") from last_err
 
 
 def search_movie(title, year, api_key):
@@ -94,20 +49,16 @@ def search_movie(title, year, api_key):
     return results[0], True
 
 
-def fetch_details(tmdb_id, api_key):
-    return tmdb_get(f"/movie/{tmdb_id}", api_key, {"append_to_response": "credits,keywords"})
-
-
 def load_cache(tmdb_id):
-    path = CACHE_DIR / f"{tmdb_id}.json"
+    path = TMDB_CACHE_DIR / f"{tmdb_id}.json"
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     return None
 
 
 def save_cache(tmdb_id, data):
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    (CACHE_DIR / f"{tmdb_id}.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+    TMDB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    (TMDB_CACHE_DIR / f"{tmdb_id}.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def summarize(details):
@@ -140,8 +91,6 @@ def summarize(details):
 
 
 def main():
-    load_env()
-
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N films (for testing)")
     parser.add_argument("--force", action="store_true", help="Ignore cache and re-fetch every film")
