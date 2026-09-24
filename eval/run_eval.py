@@ -2,12 +2,14 @@ import argparse
 import json
 import os
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 
 from google import genai
 
 from cinemagent.agent import run_agent
-from cinemagent.config import GEMINI_MODEL
+from cinemagent.citations import film_label, resolve_citations
+from cinemagent.config import ENRICHED_JSON, GEMINI_MODEL
 from cinemagent.tools import build_tool_context, close_tool_context
 
 EVAL_DIR = Path(__file__).resolve().parent
@@ -40,6 +42,14 @@ def _ground_truth_set(ground_truth):
     return {(g.get("film_id"), g.get("title"), g.get("year")) for g in ground_truth}
 
 
+@cache
+def _watched_corpus():
+    """Every watched film (tmdb_id, title, year), for citation grading."""
+    with open(ENRICHED_JSON, encoding="utf-8") as f:
+        return tuple({"tmdb_id": film["tmdb_id"], "title": film["title"], "year": film.get("year")}
+                     for film in json.load(f))
+
+
 def _live_calls(trace_steps, tool_name):
     """Non-duplicate-blocked calls to `tool_name` this run, in order. Only
     live calls actually hit the tool and produced a real result -- a
@@ -47,7 +57,7 @@ def _live_calls(trace_steps, tool_name):
     return [s for s in trace_steps if s["tool"] == tool_name and not s["blocked_duplicate"]]
 
 
-def grade_question(question, trace_steps):
+def grade_question(question, trace_steps, answer=None):
     expected_tools = question.get("expected_tools") or []
     called_tools = {s["tool"] for s in trace_steps if not s["blocked_duplicate"]}
     routing_correct = all(t in called_tools for t in expected_tools) if expected_tools else None
@@ -130,6 +140,26 @@ def grade_question(question, trace_steps):
             ),
         }
 
+    if mode == "auto_no_watched_citations":
+        # Graded on the final answer, not tool results: search_my_history
+        # always returns its closest films, so the question is whether the
+        # agent presented any watched film as a match. Films outside the
+        # watched corpus (e.g. TMDB suggestions) don't count.
+        #
+        # Currently unused: it can't distinguish citing a film AS a match
+        # from naming it to rule it out ("X is not a werewolf film"), which
+        # is acceptable behavior -- so the adversarial "nothing fits"
+        # questions are graded manually. An LLM-as-judge grader is the
+        # planned replacement.
+        cited = resolve_citations(answer or "", _watched_corpus())
+        return {
+            "routing_correct": routing_correct,
+            "answer_correct": not cited,
+            "cited_watched_films": [film_label(f) for f in cited],
+            "detail": ("no watched film cited" if not cited
+                       else f"cited {len(cited)} watched film(s): {', '.join(film_label(f) for f in cited)}"),
+        }
+
     # mode == "manual"
     return {"routing_correct": routing_correct, "answer_correct": None,
             "detail": "no ground truth -- grade manual_score by hand"}
@@ -138,11 +168,11 @@ def grade_question(question, trace_steps):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ids", type=str, default=None,
-                         help="Comma-separated question ids to run (default: all 18). Takes priority over --category.")
+                         help="Comma-separated question ids to run (default: all). Takes priority over --category.")
     parser.add_argument("--category", type=str, default=None, choices=["checkable", "fuzzy", "adversarial"],
                          help="Only run questions in this category (default: all)")
     parser.add_argument("--list", action="store_true",
-                         help="Print every question id and category, then exit without running anything")
+                         help="Print every question id, category and grading mode, then exit without running anything")
     args = parser.parse_args()
 
     with open(QUESTIONS_PATH, encoding="utf-8") as f:
@@ -150,7 +180,7 @@ def main():
 
     if args.list:
         for q in questions:
-            print(f"{q['id']:35s} {q['category']}")
+            print(f"{q['id']:35s} {q['category']:12s} {q['grading']}")
         return
 
     filtered = bool(args.ids or args.category)
@@ -190,7 +220,7 @@ def main():
                 # collected
                 # for every question run before it -- record this one as
                 # failed and move on, rather than letting one bad question
-                # take the whole 18-question run down with it.
+                # take the whole run down with it.
                 print(f"  -> ERROR: {type(e).__name__}: {e}")
                 entries.append({
                     "id": q["id"],
@@ -208,7 +238,7 @@ def main():
                 })
                 continue
 
-            grade = grade_question(q, trace_steps)
+            grade = grade_question(q, trace_steps, answer)
 
             if grade["answer_correct"] is True:
                 status = "PASS"

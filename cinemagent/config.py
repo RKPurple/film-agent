@@ -105,7 +105,6 @@ RETRIEVAL_N_RESULTS = _get_int("RETRIEVAL_N_RESULTS", 10)  # per-retriever candi
 RRF_K = _get_int("RRF_K", 60)                              # reciprocal-rank-fusion constant
 RERANKER_MODEL_NAME = _get_str("RERANKER_MODEL_NAME", "BAAI/bge-reranker-base")
 RERANK_TOP_N = _get_int("RERANK_TOP_N", 5)                 # candidates kept after rerank
-RERANK_CONFIDENCE_THRESHOLD = _get_float("RERANK_CONFIDENCE_THRESHOLD", 0.5)
 
 # --- Postgres ---
 DB_NAME = _get_str("DB_NAME", "entertainmentai")

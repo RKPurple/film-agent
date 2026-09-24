@@ -1,7 +1,0 @@
-README.md
-pyproject.toml
-cinemagent/__init__.py
-cinemagent.egg-info/PKG-INFO
-cinemagent.egg-info/SOURCES.txt
-cinemagent.egg-info/dependency_links.txt
-cinemagent.egg-info/top_level.txt

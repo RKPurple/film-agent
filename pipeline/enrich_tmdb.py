@@ -87,6 +87,7 @@ def summarize(details):
         "original_language": details.get("original_language"),
         "vote_average": details.get("vote_average"),
         "popularity": details.get("popularity"),
+        "poster_path": details.get("poster_path"),
     }
 
 

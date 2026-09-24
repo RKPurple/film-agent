@@ -2,7 +2,8 @@
 Interactive hybrid-retrieval search over the watched-film corpus -- no LLM
 involved, just cinemagent.retrieval's vector + BM25 -> RRF -> rerank.
 
-Prints the final reranked list with raw cross-encoder scores. --stages also
+Prints the final reranked list with each film's raw cross-encoder logit and
+its confidence (sigmoid of the logit, as retrieve() returns). --stages also
 prints the vector-only, BM25-only and fused (RRF) lists first, to inspect
 the pipeline stage by stage.
 
@@ -14,7 +15,7 @@ Usage:
 import argparse
 
 from cinemagent.config import RERANK_TOP_N
-from cinemagent.retrieval import load_retrieval_index, retrieve_stages
+from cinemagent.retrieval import load_retrieval_index, retrieve_stages, sigmoid
 
 
 def main():
@@ -53,7 +54,7 @@ def main():
 
         print(f"\n-- reranked (top {RERANK_TOP_N}, cross-encoder) --")
         for rank, (fid, score) in enumerate(stages.reranked, 1):
-            print(f"  {rank}. {describe(fid)}  rerank_score={score:.4f}")
+            print(f"  {rank}. {describe(fid)}  logit={score:+.4f}  confidence={sigmoid(float(score)):.4f}")
         print()
 
 

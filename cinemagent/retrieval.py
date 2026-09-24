@@ -4,10 +4,9 @@ vector + BM25 fused via reciprocal rank fusion, then cross-encoder
 reranking.
 
 Public entry point: load_retrieval_index() once, then
-retrieve(index, query) -> [(film_id, confidence), ...] per query, and
-confident_matches() to apply RERANK_CONFIDENCE_THRESHOLD.
-retrieve_stages() exposes the intermediate lists (and raw reranker
-scores) for inspection -- see cli/search.py --stages.
+retrieve(index, query) -> [(film_id, confidence), ...] per query.
+retrieve_stages() exposes the intermediate lists (and the reranker's raw
+logits) for inspection -- see cli/search.py --stages.
 
 - BM25 indexes the SAME blended chunk text Chroma embeds (via
   build_chunk_text() in cinemagent/chunking.py), so comparisons test the
@@ -29,10 +28,16 @@ scores) for inspection -- see cli/search.py --stages.
   pool out to RETRIEVAL_N_RESULTS with zero-signal docs in films_enriched.json's
   arbitrary order. Abstract queries BM25 can't help with (e.g. "found
   family") now lean honestly on vector search alone.
-- The reranker emits an unbounded logit; retrieve() passes it through
-  sigmoid to get a 0-1 confidence. confident_matches() keeps only results
-  at or above RERANK_CONFIDENCE_THRESHOLD (0.5, "more likely relevant than
-  not").
+- The reranker emits an unbounded logit. rerank() asks CrossEncoder.predict()
+  for it explicitly (identity activation) -- predict()'s default applies its
+  own sigmoid for single-label models, which silently made the old "logits"
+  probabilities and retrieve()'s sigmoid a second one. retrieve() applies
+  exactly one sigmoid to get a 0-1 confidence.
+- There is no confidence gate. Calibration against hand-labeled queries
+  (eval/calibrate_threshold.py) found no threshold that separates relevant
+  from irrelevant results across queries: scores order results WITHIN a
+  query but aren't comparable across queries. The agent judges relevance
+  from each result's text instead.
 """
 
 import json
@@ -42,6 +47,7 @@ from dataclasses import dataclass
 
 import chromadb
 import snowballstemmer
+import torch
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
@@ -51,7 +57,6 @@ from cinemagent.config import (
     CHROMA_DIR,
     EMBEDDING_MODEL_NAME,
     ENRICHED_JSON,
-    RERANK_CONFIDENCE_THRESHOLD,
     RERANK_TOP_N,
     RERANKER_MODEL_NAME,
     RETRIEVAL_N_RESULTS,
@@ -131,7 +136,9 @@ def reciprocal_rank_fusion(ranked_lists, k=RRF_K):
 
 def rerank(cross_encoder, query, candidate_ids, film_texts, top_n=RERANK_TOP_N):
     pairs = [(query, film_texts[fid]) for fid in candidate_ids]
-    scores = cross_encoder.predict(pairs)
+    # Identity activation: TRUE logits, not predict()'s default sigmoid --
+    # see the module docstring.
+    scores = cross_encoder.predict(pairs, activation_fct=torch.nn.Identity(), show_progress_bar=False)
     ranked = sorted(zip(candidate_ids, scores), key=lambda pair: pair[1], reverse=True)
     return ranked[:top_n]
 
@@ -198,7 +205,8 @@ class RetrievalStages:
 
 def retrieve_stages(index, query):
     """Run the full pipeline (vector + BM25 -> RRF -> rerank), keeping every
-    intermediate list. Reranker scores are raw logits, not confidences."""
+    intermediate list. Reranker scores are raw logits (unbounded, can be
+    negative), not confidences."""
     vector_ids = vector_search(index.embed_model, index.collection, query)
     bm25_ids = bm25_search(index.bm25, index.film_ids, query)
     fused = reciprocal_rank_fusion([vector_ids, bm25_ids])
@@ -208,10 +216,6 @@ def retrieve_stages(index, query):
 
 def retrieve(index, query):
     """Return [(film_id, confidence), ...] sorted by confidence descending,
-    where confidence is the reranker's raw logit passed through sigmoid."""
-    return [(fid, sigmoid(raw_score)) for fid, raw_score in retrieve_stages(index, query).reranked]
-
-
-def confident_matches(reranked, threshold=RERANK_CONFIDENCE_THRESHOLD):
-    """Keep only (film_id, confidence) pairs at or above threshold, in order."""
-    return [(fid, confidence) for fid, confidence in reranked if confidence >= threshold]
+    where confidence is the reranker's raw logit passed through ONE sigmoid.
+    Confidences are only comparable within a single query."""
+    return [(fid, sigmoid(float(logit))) for fid, logit in retrieve_stages(index, query).reranked]

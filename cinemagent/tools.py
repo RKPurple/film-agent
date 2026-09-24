@@ -9,11 +9,13 @@ Design notes:
   cross_reference/get_all_genres), adding only argument unpacking and
   JSON-safe output. get_all_genres is a whole-table read so the agent can
   check the exact genre vocabulary before an exact-match filter_by_genre.
-- search_my_history calls cinemagent.retrieval's retrieve() +
-  confident_matches() only -- no LLM call of its own, since stacking two
-  LLM calls would make citations survive paraphrasing twice. It returns raw
-  confident matches and leaves all synthesis (including "not in corpus")
-  to the agent.
+- search_my_history calls cinemagent.retrieval's retrieve() only -- no LLM
+  call of its own, since stacking two LLM calls would make citations
+  survive paraphrasing twice. It returns the reranked top RERANK_TOP_N
+  (the closest films, not confirmed matches) with their evidence text and
+  leaves all relevance judgment and synthesis (including "not in corpus")
+  to the agent -- there's no confidence gate, since no global threshold
+  separates relevant from irrelevant results (see eval/calibrate_threshold.py).
 - search_tmdb has no prior script. It reuses cinemagent.tmdb_client's
   tmdb_get()/fetch_details() but not enrich_tmdb.py's search_movie() (which requires an exact
   release-year match an ad hoc lookup rarely has), using its own looser
@@ -33,7 +35,7 @@ import json
 
 from cinemagent import config  # noqa: F401 -- loads .env before the __main__ smoke test reads os.environ
 from cinemagent import queries
-from cinemagent.retrieval import confident_matches, load_retrieval_index, retrieve
+from cinemagent.retrieval import load_retrieval_index, retrieve
 from cinemagent.tmdb_client import fetch_details, tmdb_get
 
 
@@ -162,10 +164,14 @@ TOOL_SCHEMAS = [
         "description": (
             "Semantic search over the watched-film corpus for vibe/theme/mood "
             "queries that don't map to a rigid field -- e.g. 'movies that felt "
-            "hopeful', 'something with a twisty plot'. Returns confident matches "
-            "only (low-confidence retrieval results are already filtered out); "
-            "an empty result means nothing in the watch history confidently "
-            "matches, which should be reported honestly, not guessed around."
+            "hopeful', 'something with a twisty plot'. Returns the films in the "
+            "watch history CLOSEST to the query, ranked -- not confirmed matches; "
+            "even the top result can be the best of a bad set. Judge whether each "
+            "one actually fits from its returned text (overview, tone summary, "
+            "and Rohan's own review), not from its rank or its presence in the "
+            "list. confidence only compares results within this one search. If "
+            "none genuinely fit, report that nothing in the watch history fits "
+            "rather than presenting weak matches."
         ),
         "parameters": {
             "type": "object",
@@ -261,9 +267,8 @@ def _dispatch_get_all_genres(args, ctx):
 
 
 def _dispatch_search_my_history(args, ctx):
-    reranked = retrieve(ctx.index, args["query"])
     matches = []
-    for fid, confidence in confident_matches(reranked):
+    for fid, confidence in retrieve(ctx.index, args["query"]):
         film = ctx.index.film_lookup[fid]
         matches.append({
             "title": film["title"],
@@ -309,6 +314,7 @@ def _dispatch_search_tmdb(args, ctx):
         "directors": [c["name"] for c in credits.get("crew", []) if c.get("job") == "Director"],
         "cast": [c["name"] for c in credits.get("cast", [])[:5]],
         "already_watched": str(details["id"]) in ctx.index.film_lookup,
+        "poster_path": details.get("poster_path"),
     }
 
 
@@ -386,6 +392,7 @@ def _dispatch_tmdb_recommendations(args, ctx):
             "overview": r.get("overview"),
             "vote_average": r.get("vote_average"),
             "already_watched": str(r["id"]) in ctx.index.film_lookup,
+            "poster_path": r.get("poster_path"),
         }
         for r in merged
     ]

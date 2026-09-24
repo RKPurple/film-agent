@@ -18,8 +18,16 @@ MAX_RETRIES = 3
 
 
 def tmdb_get(path, api_key, params=None):
-    """GET a TMDB endpoint with retry/backoff on transient errors and 429s."""
+    """GET a TMDB endpoint with retry/backoff on transient errors and 429s.
+
+    The API key only ever goes into the URL actually requested. Error
+    messages use safe_url, which shows the path and every other param with
+    the key replaced by "***" -- these messages reach the agent's tool
+    results, trace logs, eval results and the pipeline's unmatched.csv.
+    """
     params = dict(params or {})
+    other_params = urllib.parse.urlencode(params)
+    safe_url = f"{TMDB_BASE}{path}?{other_params + '&' if other_params else ''}api_key=***"
     params["api_key"] = api_key
     url = f"{TMDB_BASE}{path}?{urllib.parse.urlencode(params)}"
 
@@ -42,7 +50,7 @@ def tmdb_get(path, api_key, params=None):
         except (urllib.error.URLError, TimeoutError) as e:
             last_err = e
         time.sleep(1.5 * attempt)
-    raise RuntimeError(f"TMDB request failed after {MAX_RETRIES} attempts: {url}") from last_err
+    raise RuntimeError(f"TMDB request failed after {MAX_RETRIES} attempts: {safe_url}") from last_err
 
 
 def fetch_details(tmdb_id, api_key):

@@ -33,10 +33,10 @@ User query ──▶ Agent (Gemini, function-calling)
 
 - **Hybrid retrieval**: vector similarity (BGE embeddings via Chroma) fused with BM25 keyword search via reciprocal rank fusion, so both semantic and literal-keyword matches contribute.
 - **Cross-encoder reranking**: the fused candidate pool gets rescored by a `BAAI/bge-reranker-base` cross-encoder, which jointly attends over the query and each candidate rather than comparing precomputed vectors — catches distinctions a bi-encoder can't (e.g. "text is *about* anxiety" vs. "text would *make you feel* anxious").
-- **Confidence-gated retrieval**: `search_my_history` converts each reranked result's cross-encoder score to a 0–1 confidence with a sigmoid and drops anything below a fixed threshold (`RERANK_CONFIDENCE_THRESHOLD`, 0.5 by default). If nothing clears it, the tool returns an empty result rather than its weakest matches, and the agent's system prompt requires it to say the answer isn't in your watch history instead of guessing.
+- **Agent-judged relevance**: `search_my_history` returns the reranked top films with a 0–1 confidence (one sigmoid over the cross-encoder logit) and each film's evidence text. There's no confidence cutoff: calibration against hand-labeled queries (`eval/calibrate_threshold.py`) showed reranker scores order results within a query but no global threshold separates relevant from irrelevant ones. Instead the agent's system prompt treats results as the closest films, not confirmed matches, and requires it to judge fit from each film's overview, tone summary and review, citing only films that fit and saying plainly when nothing in your watch history does.
 - **Weighted chunk embedding**: each film's embedded text repeats the personal review most heavily, then the tone summary, then everything else once — a repetition-based way to bias a single blended embedding toward the most personally meaningful signal.
 - **Agentic tool routing**: a 9-tool agent (4 structured filters, cross-reference, a genre-vocabulary lookup, semantic search, TMDB search, TMDB recommendations) that chains multiple tools per turn when a question needs it, short-circuits exact-duplicate tool calls, and logs a full reasoning trace per run.
-- **Eval-driven tuning**: a 19-question eval set split between auto-gradable "checkable" questions (exact expected results) and manually-rated "fuzzy" questions (recommendations, vibe search) — every retrieval/prompt change gets checked against both before/after.
+- **Eval-driven tuning**: a 24-question eval set split between auto-gradable "checkable" questions (exact expected results), manually-rated "fuzzy" questions (recommendations, vibe search), and adversarial trap questions (subjects absent from the watch history, graded manually) — every retrieval/prompt change gets checked against all of them before/after.
 
 ## Tech stack
 
@@ -57,8 +57,8 @@ cinemagent/   The installable package -- everything the live system runs on.
   config.py       Loads .env; every tunable setting and data path in one place.
   queries.py      Structured Postgres queries (actor, director, genre, rating, cross-reference).
   chunking.py     The one definition of a film's embedded/BM25 chunk text.
-  retrieval.py    Hybrid retrieval: vector + BM25 -> RRF fusion -> cross-encoder rerank,
-                  plus the confidence threshold.
+  retrieval.py    Hybrid retrieval: vector + BM25 -> RRF fusion -> cross-encoder rerank.
+  citations.py    Resolves the "Title (Year)" films an answer cites (used by eval grading).
   tmdb_client.py  Shared TMDB HTTP client (pipeline enrichment + live agent tools).
   tools.py        Agent tool schemas and dispatch.
   agent.py        The tool-calling agent loop, duplicate-call guard, trace logging.
@@ -151,6 +151,8 @@ python3 eval/show_results.py  # pretty-print the most recent run
 
 ## Eval results
 
-The eval set has 19 questions split into three categories: **checkable** (structured questions with a known-correct expected answer, auto-graded against Postgres directly), **fuzzy** (recommendations and vibe/theme search, rated manually since there's no single correct answer), and **adversarial** (deliberately ambiguous or trap questions, e.g. asking about "documentaries" when none exist in the watch history, to check the system reports that honestly rather than fabricating one).
+The eval set has 24 questions split into three categories: **checkable** (10 structured questions with a known-correct expected answer, auto-graded against Postgres directly), **fuzzy** (6 recommendation and vibe/theme questions, rated manually since there's no single correct answer), and **adversarial** (8 deliberately ambiguous or trap questions, e.g. asking about "documentaries" or werewolf movies when none exist in the watch history, to check the system reports that honestly rather than fabricating one).
 
-As of the latest tuning pass, all 12 auto-gradable questions pass, including full tool-routing accuracy on every actor/director/genre/rating/cross-reference question. The fuzzy category is judged qualitatively per run — see `eval/results/` for the full history of runs and the reasoning behind each retrieval/prompt change.
+Grading modes: `auto_exact_set`, `auto_empty`, `auto_intersection` and `auto_genre_rating_threshold` compare a tool's returned film set to stored ground truth (refreshed from Postgres by `eval/refresh_ground_truth.py`); `auto_duplicate_guard` checks the duplicate-call guard fired; `manual` is scored by hand. 11 questions are auto-graded (the 10 checkable ones plus the duplicate-guard check) and 13 are manual: the 6 fuzzy questions and 7 adversarial ones. Adversarial "nothing fits" questions are graded manually because a correct answer may name watched films specifically to rule them out, which an automatic citation check can't tell apart from presenting them as matches.
+
+In the latest run, all 11 auto-graded questions pass, with correct tool routing on every actor/director/genre/rating/cross-reference question. The fuzzy category is judged qualitatively per run — see `eval/results/` for the full history of runs and the reasoning behind each retrieval/prompt change.

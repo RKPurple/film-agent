@@ -32,8 +32,17 @@ def find_run(arg):
     return max(runs, key=os.path.getmtime)
 
 
+FREE_ROUTING = "n/a (free routing)"
+
+
 def fmt_bool(v):
     return {True: "PASS", False: "FAIL", None: " -- "}[v]
+
+
+def fmt_routing(v):
+    """routing_correct is None exactly when the question has expected_tools
+    null (routing left to the agent) -- not a routing failure."""
+    return FREE_ROUTING if v is None else fmt_bool(v)
 
 
 def main():
@@ -51,14 +60,14 @@ def main():
     print(f"Cases:  {len(results)}\n")
 
     # per-question table
-    hdr = f"{'id':<34} {'category':<12} {'route':>6} {'answer':>7} {'tools':>6}  {'manual':>6}"
+    hdr = f"{'id':<34} {'category':<12} {'route':>18} {'answer':>7} {'tools':>6}  {'manual':>6}"
     print(hdr)
     print("-" * len(hdr))
     for r in results:
         g = r.get("grade", {})
         print(
             f"{r['id']:<34} {r['category']:<12} "
-            f"{fmt_bool(g.get('routing_correct')):>6} "
+            f"{fmt_routing(g.get('routing_correct')):>18} "
             f"{fmt_bool(g.get('answer_correct')):>7} "
             f"{r.get('tool_call_count', 0):>6}  "
             f"{str(r.get('manual_score')):>6}"
@@ -81,9 +90,12 @@ def main():
     print("\nBy category")
     for cat, rs in sorted(by_cat.items()):
         route = sum(1 for r in rs if r["grade"].get("routing_correct"))
+        route_checked = sum(1 for r in rs if r["grade"].get("routing_correct") is not None)
+        free = len(rs) - route_checked
+        free_note = f" (+{free} {FREE_ROUTING})" if free else ""
         ans = sum(1 for r in rs if r["grade"].get("answer_correct"))
         ans_graded = sum(1 for r in rs if r["grade"].get("answer_correct") is not None)
-        print(f"  {cat:<14} n={len(rs):<3} routing {route}/{len(rs)}   answer {ans}/{ans_graded}")
+        print(f"  {cat:<14} n={len(rs):<3} routing {route}/{route_checked}{free_note}   answer {ans}/{ans_graded}")
 
     # failures / needs-review detail
     flagged = [

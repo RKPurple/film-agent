@@ -14,6 +14,7 @@
       {"film_id": 616037, "title": "Thor: Love and Thunder", "year": 2022},
       {"film_id": 1084242, "title": "Zootopia 2", "year": 2025}
     ],
+    "ground_truth_call": {"tool": "filter_by_actor", "args": {"name": "Idris Elba"}},
     "notes": "Single structured tool, moderate-size result set."
   },
   {
@@ -28,6 +29,7 @@
       {"film_id": 157336, "title": "Interstellar", "year": 2014},
       {"film_id": 1368337, "title": "The Odyssey", "year": 2026}
     ],
+    "ground_truth_call": {"tool": "filter_by_director", "args": {"name": "Christopher Nolan"}},
     "notes": "Single structured tool."
   },
   {
@@ -41,6 +43,7 @@
       {"film_id": 505642, "title": "Black Panther: Wakanda Forever", "year": 2022},
       {"film_id": 1233413, "title": "Sinners", "year": 2025}
     ],
+    "ground_truth_call": {"tool": "filter_by_director", "args": {"name": "Ryan Coogler"}},
     "notes": "Small result set, easy exact check."
   },
   {
@@ -54,6 +57,7 @@
       {"film_id": 273248, "title": "The Hateful Eight", "year": 2015},
       {"film_id": 44896, "title": "Rango", "year": 2011}
     ],
+    "ground_truth_call": {"tool": "filter_by_genre", "args": {"genre": "Western"}},
     "notes": "Small genre bucket."
   },
   {
@@ -66,6 +70,7 @@
       {"film_id": 281338, "title": "War for the Planet of the Apes", "year": 2017},
       {"film_id": 597922, "title": "The Greatest Beer Run Ever", "year": 2022}
     ],
+    "ground_truth_call": {"tool": "filter_by_genre", "args": {"genre": "War"}},
     "notes": "Smallest genre bucket -- only 2 films."
   },
   {
@@ -82,6 +87,7 @@
       {"film_id": 889737, "title": "Joker: Folie à Deux", "year": 2024},
       {"film_id": 1032823, "title": "Trap", "year": 2024}
     ],
+    "ground_truth_call": {"tool": "filter_by_rating", "args": {"max_rating": 2.0}},
     "notes": "Rating filter, low end of the scale."
   },
   {
@@ -107,6 +113,7 @@
       {"film_id": 493922, "title": "Hereditary", "year": 2018},
       {"film_id": 354912, "title": "Coco", "year": 2017}
     ],
+    "ground_truth_call": {"tool": "filter_by_rating", "args": {"min_rating": 5.0}},
     "notes": "Rating filter, larger result set (15 films)."
   },
   {
@@ -117,15 +124,17 @@
     "grading": "auto_exact_set",
     "ground_truth": [
       {"film_id": 1726, "title": "Iron Man", "year": 2008},
+      {"film_id": 16538, "title": "I Love You, Man", "year": 2009},
       {"film_id": 10138, "title": "Iron Man 2", "year": 2010},
-      {"film_id": 106646, "title": "The Wolf of Wall Street", "year": 2013},
       {"film_id": 68721, "title": "Iron Man 3", "year": 2013},
+      {"film_id": 106646, "title": "The Wolf of Wall Street", "year": 2013},
       {"film_id": 212778, "title": "Chef", "year": 2014},
       {"film_id": 315635, "title": "Spider-Man: Homecoming", "year": 2017},
       {"film_id": 429617, "title": "Spider-Man: Far From Home", "year": 2019},
       {"film_id": 634649, "title": "Spider-Man: No Way Home", "year": 2021},
       {"film_id": 533535, "title": "Deadpool & Wolverine", "year": 2024}
     ],
+    "ground_truth_call": {"tool": "cross_reference", "args": {"person_name": "Jon Favreau"}},
     "notes": "cross_reference over filter_by_actor/director -- must dedupe Chef (appears in both roles)."
   },
   {
@@ -151,6 +160,7 @@
       {"film_id": 50646, "title": "Crazy, Stupid, Love.", "year": 2011},
       {"film_id": 22538, "title": "Scott Pilgrim vs. the World", "year": 2010}
     ],
+    "ground_truth_call": {"tool": "filter_by_genre", "args": {"genre": "Comedy"}},
     "notes": "filter_by_genre alone answers this -- it returns my_rating on every row, so the agent can filter by rating itself off one call. Originally required filter_by_rating too (auto_intersection), but that made a single-call correct answer grade as wrong. Graded with auto_genre_rating_threshold: filters filter_by_genre's own result by my_rating >= min_rating."
   },
   {
@@ -162,6 +172,10 @@
     "ground_truth": [
       {"film_id": 68718, "title": "Django Unchained", "year": 2012},
       {"film_id": 273248, "title": "The Hateful Eight", "year": 2015}
+    ],
+    "ground_truth_call": [
+      {"tool": "filter_by_actor", "args": {"name": "Samuel L. Jackson"}},
+      {"tool": "filter_by_genre", "args": {"genre": "Western"}}
     ],
     "notes": "Added to replace checkable_compound_comedy_high as the suite's chaining question -- unlike that one, no single tool call can answer this (filter_by_actor returns every Samuel L. Jackson film across all genres, filter_by_genre returns every Western regardless of cast), so the agent must call both and intersect the results itself. Verified against films_enriched.json: 8 SLJ films total, 3 Westerns total, exactly 2 in both."
   },
@@ -223,10 +237,11 @@
     "id": "adversarial_documentaries",
     "category": "adversarial",
     "query": "What documentaries have I watched?",
-    "expected_tools": ["filter_by_genre"],
-    "grading": "auto_empty",
+    "expected_tools": null,
+    "grading": "manual",
     "ground_truth": [],
-    "notes": "'Documentary' isn't a genre present in the corpus at all -- ground truth is an empty list. Tests honest 'none found' instead of a fabricated or miscategorized answer."
+    "ground_truth_call": {"tool": "filter_by_genre", "args": {"genre": "Documentary"}},
+    "notes": "'Documentary' isn't a genre present in the corpus at all -- ground truth is an empty list (ground_truth_call is kept so refresh_ground_truth.py still checks that data premise). Routing is free: checking get_all_genres and then search_my_history is as valid as filter_by_genre. Tests honest 'none found' instead of a fabricated or miscategorized answer. Graded manually: PASS if the answer says nothing in the watch history fits and presents no watched film AS a match; naming watched films explicitly to rule them out, or offering one clearly framed as related-but-not-a-match, is fine."
   },
   {
     "id": "adversarial_marvel_ambiguous",
@@ -245,5 +260,50 @@
     "grading": "auto_duplicate_guard",
     "ground_truth": null,
     "notes": "Deliberately instructs a literal repeat -- checks that the step-14 duplicate-call guard actually engages rather than the model just complying and burning an iteration."
+  },
+  {
+    "id": "adversarial_werewolves",
+    "category": "adversarial",
+    "query": "What werewolf movies have I seen?",
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "No werewolf film is in the watch history (verified during calibration labeling). search_my_history has no confidence gate and always returns its 8 closest films, so this tests whether the agent judges them from the evidence and says nothing fits instead of presenting near misses (e.g. The Wolf of Wall Street on a title-word match). Graded manually: PASS if the answer says nothing in the watch history fits and presents no watched film AS a match; naming watched films explicitly to rule them out, or offering one clearly framed as related-but-not-a-match, is fine."
+  },
+  {
+    "id": "adversarial_time_loop",
+    "category": "adversarial",
+    "query": "Have I watched any time-loop movies, where someone relives the same day over and over?",
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "No time-loop film is in the watch history (verified during calibration labeling). Loose sci-fi/time themes will surface as closest matches; tests that the agent rejects them from the evidence rather than presenting them. Graded manually: PASS if the answer says nothing in the watch history fits and presents no watched film AS a match; naming watched films explicitly to rule them out, or offering one clearly framed as related-but-not-a-match, is fine."
+  },
+  {
+    "id": "adversarial_cold_war_spy",
+    "category": "adversarial",
+    "query": "What Cold War spy thrillers have I watched?",
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "No Cold War espionage film is in the watch history (verified during calibration labeling). A Thriller genre filter returns real thrillers, so this tests whether the agent checks the Cold War/spy part of the question instead of answering with the genre list. Graded manually: PASS if the answer says nothing in the watch history fits and presents no watched film AS a match; naming watched films explicitly to rule them out, or offering one clearly framed as related-but-not-a-match, is fine."
+  },
+  {
+    "id": "adversarial_pirates",
+    "category": "adversarial",
+    "query": "Have I seen any pirate adventure movies?",
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "No pirate film is in the watch history (verified during calibration labeling). Adventure films will surface as closest matches; tests that the agent says nothing fits rather than presenting them. Graded manually: PASS if the answer says nothing in the watch history fits and presents no watched film AS a match; naming watched films explicitly to rule them out, or offering one clearly framed as related-but-not-a-match, is fine."
+  },
+  {
+    "id": "adversarial_ballet_near_miss",
+    "category": "adversarial",
+    "query": "Have I seen any films about ballet dancers?",
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "No ballet film is in the watch history (verified during calibration labeling), but it's a near miss: a film about obsessive artistic perfection in another art form may come up. Offering one as clearly labeled 'related but not ballet' is acceptable; presenting it as a ballet film is a fail."
   }
 ]

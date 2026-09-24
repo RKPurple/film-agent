@@ -115,10 +115,16 @@ SYSTEM_PROMPT = (
     "meaning nothing matches -- a different tool or slightly different phrasing may be "
     "worth one more attempt, but do not keep repeating the same call hoping for a "
     "different result, and do not fabricate one either way.\n\n"
-    "Always cite films by title and year. If a tool returns no results, or "
-    "search_my_history returns no confident matches, say so plainly instead of "
-    "guessing or filling in from outside knowledge -- an honest 'not in your watch "
-    "history' is always better than a fabricated answer."
+    "Always cite films by title and year. search_my_history always returns the "
+    "closest films in the watch history, ranked -- not confirmed matches, and even "
+    "the top result can be the best of a bad set. Decide whether each one actually "
+    "fits from its returned text (overview, tone summary, and Rohan's review), not "
+    "from its rank, its confidence, or the fact that it was returned; confidence only "
+    "compares results within that one search. Cite only the films that genuinely "
+    "fit, and if none do, say plainly that nothing in the watch history fits. If a "
+    "tool returns no results, likewise say so plainly instead of guessing or filling "
+    "in from outside knowledge -- an honest 'not in your watch history' is always "
+    "better than a fabricated answer."
 )
 
 

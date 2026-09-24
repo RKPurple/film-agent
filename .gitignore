@@ -28,3 +28,5 @@ STUDY_GUIDE.md
 
 # Interview prep -- personal, not part of the public repo
 interview_prep.md
+
+*.egg-info/
