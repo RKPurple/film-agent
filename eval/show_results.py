@@ -34,6 +34,25 @@ def find_run(arg):
 
 FREE_ROUTING = "n/a (free routing)"
 NO_ANSWER = "(no answer: error)"  # run_eval stores answer None when a question raised
+EXCERPT_CHARS = 240  # per-turn answer excerpt for multi-turn questions
+
+
+def excerpt(answer, limit=EXCERPT_CHARS):
+    if answer is None:
+        return NO_ANSWER
+    flat = " ".join(answer.split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def print_turns(r):
+    """Multi-turn question, turn by turn: query, tools, exit_reason (any
+    value, e.g. max_iterations_answered, is shown as-is), answer excerpt."""
+    for i, turn in enumerate(r["turns"], 1):
+        done = turn.get("done") or {}
+        tools = " -> ".join(st["tool"] for st in turn.get("trace_steps", [])) or "(none)"
+        print(f"  turn {i}: {turn['query']}")
+        print(f"    tools: {tools}   exit: {done.get('exit_reason', '?')}")
+        print(textwrap.indent(textwrap.fill(excerpt(turn.get("answer")), 88), "    A: "))
 
 
 def fmt_bool(v):
@@ -98,6 +117,14 @@ def main():
         ans_graded = sum(1 for r in rs if r["grade"].get("answer_correct") is not None)
         print(f"  {cat:<14} n={len(rs):<3} routing {route}/{route_checked}{free_note}   answer {ans}/{ans_graded}")
 
+    multi = [r for r in results if "structural_check" in r]
+    if multi:
+        passed = sum(1 for r in multi if r["structural_check"]["passed"])
+        print(f"\nMulti-turn structural checks: {passed}/{len(multi)} passed")
+        for r in multi:
+            if not r["structural_check"]["passed"]:
+                print(f"  FAIL {r['id']}: {'; '.join(r['structural_check']['problems'])}")
+
     # failures / needs-review detail
     flagged = [
         r for r in results
@@ -112,6 +139,13 @@ def main():
             g = r["grade"]
             tag = "FAIL" if (g.get("routing_correct") is False or g.get("answer_correct") is False) else "MANUAL"
             print(f"\n[{tag}] {r['id']}  ({r['category']})")
+            if "turns" in r:
+                sc = r.get("structural_check") or {}
+                print(f"  structural check: {'PASS' if sc.get('passed') else 'FAIL'}"
+                      + (f" -- {'; '.join(sc['problems'])}" if sc.get("problems") else "")
+                      + (f"   info: {r['info']}" if r.get("info") else ""))
+                print_turns(r)
+                continue
             print(f"  Q: {r['query']}")
             if g.get("detail"):
                 print(f"  note: {g['detail']}")
@@ -126,9 +160,14 @@ def main():
         print("=" * 60)
         for r in results:
             print(f"\n{r['id']}")
-            for i, s in enumerate(r.get("trace_steps", []), 1):
-                dup = "  [blocked duplicate]" if s.get("blocked_duplicate") else ""
-                print(f"  {i}. {s['tool']}({json.dumps(s.get('arguments', {}))}){dup}")
+            groups = ([(f"turn {t}", turn.get("trace_steps", [])) for t, turn in enumerate(r["turns"], 1)]
+                      if "turns" in r else [(None, r.get("trace_steps", []))])
+            for label, steps in groups:
+                if label:
+                    print(f"  {label}:")
+                for i, s in enumerate(steps, 1):
+                    dup = "  [blocked duplicate]" if s.get("blocked_duplicate") else ""
+                    print(f"  {'  ' if label else ''}{i}. {s['tool']}({json.dumps(s.get('arguments', {}))}){dup}")
     print()
 
 

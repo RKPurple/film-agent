@@ -21,7 +21,7 @@ How it works:
     done         {exit_reason, iterations, interaction_id, resumable,
                   model_calls, usage, elapsed_ms, responses, error}
   done is always the last event; exit_reason is final_answer,
-  max_iterations_reached or error. Consumers: collect() rebuilds
+  max_iterations_answered, max_iterations_reached or error. Consumers: collect() rebuilds
   (answer, trace_steps, done); with_trace_log() passes events through and
   appends the JSONL trace record when the stream ends.
 - Citations are title + year (no bracket-number scheme, since one turn may
@@ -34,16 +34,24 @@ Design notes:
   SYSTEM_PROMPT distinguishes an {"error": ...} result (call failed, don't
   repeat) from an empty list (valid "nothing matches").
 - Errors: tool exceptions are already caught by call_tool() and returned
-  to the model as {"error": ...} results. Gemini API errors
-  (google.genai.errors.APIError) and network/timeout errors, plus a
+  to the model as {"error": ...} results. Gemini API errors (the
+  Interactions client's own APIError hierarchy, plus
+  google.genai.errors.APIError) and network/timeout errors, plus a
   model response with no function calls that is unusable (failed /
   cancelled / incomplete status, or no text), yield an error event and
   then done(exit_reason="error") instead of raising. Anything else is a
   programming error and propagates -- turning a code bug into a polite
   error event would hide it.
-- resumable is True only for final_answer: after the iteration cap, an
-  error or an abort, the last stored interaction requested tool calls whose
-  results were never sent back, so chaining a new turn from it isn't safe.
+- Iteration cap: after AGENT_MAX_ITERATIONS tool-calling responses, the
+  pending function results are sent with a note that the tool budget is
+  exhausted, in ONE final create() with function calling disabled
+  (generation_config tool_choice "none"). Usable text becomes the answer
+  (exit_reason max_iterations_answered); otherwise FALLBACK_MESSAGE
+  (max_iterations_reached).
+- resumable is True only for final_answer and max_iterations_answered:
+  after an unanswered cap, an error or an abort, the last stored
+  interaction may have requested tool calls whose results were never sent
+  back, so chaining a new turn from it isn't safe.
 - Every with_trace_log()-wrapped turn appends one untruncated JSON record
   to logs/agent_traces.jsonl, including early closes (exit_reason
   "aborted") and propagated exceptions ("crashed").
@@ -60,6 +68,11 @@ from pathlib import Path
 
 import httpx
 from google.genai import errors as genai_errors
+# The Interactions client raises its own error hierarchy (BadRequestError,
+# RateLimitError, InternalServerError, APIConnectionError, ...), which is
+# NOT a subclass of google.genai.errors.APIError and isn't exported
+# publicly -- hence the private import.
+from google.genai._gaos.lib import compat_errors as interactions_errors
 
 from cinemagent.config import AGENT_MAX_ITERATIONS, GEMINI_MODEL, LOGS_DIR
 from cinemagent.tools import TOOL_SCHEMAS, call_tool
@@ -111,7 +124,22 @@ SYSTEM_PROMPT = (
     "candidate films. Those candidates are NOT pre-filtered -- you must exclude any "
     "tagged already_watched yourself, then rank what's left by fit (genre/vibe from "
     "the overviews, vote_average, and how well it matches what made X appealing) "
-    "before presenting a recommendation.\n\n"
+    "before presenting a recommendation. Prefer recommending from those candidates, since "
+    "they're already tagged already_watched. If you do suggest films from your own "
+    "knowledge, verify them all together in a single step (one search_tmdb call per film, "
+    "issued in parallel) -- never one film per step -- and don't look a film up just to "
+    "restate information that's already in the conversation.\n\n"
+    "Know the tools' limits: they can't sort or filter unwatched films by rating. "
+    "tmdb_recommendations returns a fixed set of up to 10 candidates with TMDB's audience "
+    "vote_average (0-10), search_tmdb returns no rating, and no tool has critic scores. "
+    "When a request depends on something the tools can't provide, or is ambiguous (e.g. "
+    "'lower rated' could mean Rohan's own rating or TMDB's audience score), ask a brief "
+    "clarifying question or state the limitation instead of improvising with many "
+    "lookups.\n\n"
+    "Within a conversation, when Rohan clarifies what a term means (e.g. 'highly rated' = "
+    "4.5 stars and up), keep using that meaning for the rest of the conversation. Respect "
+    "scope words: 'in my history' or 'have I watched' means watched films only -- don't add "
+    "unwatched recommendations unless he asks for them.\n\n"
     "Tool results come back in two different 'nothing useful' shapes, and they mean "
     "different things. A result containing an 'error' key means the call itself "
     "failed (bad id, missing configuration, malformed input) -- do not repeat that "
@@ -148,9 +176,18 @@ USAGE_FIELDS = {
 
 # Loop failures that become an error event instead of raising -- see the
 # module docstring. httpx is the SDK's transport.
-RECOVERABLE_ERRORS = (genai_errors.APIError, httpx.HTTPError, TimeoutError, ConnectionError)
+RECOVERABLE_ERRORS = (interactions_errors.APIError, genai_errors.APIError, httpx.HTTPError, TimeoutError,
+                      ConnectionError)
 
 UNUSABLE_STATUSES = {"failed", "cancelled", "incomplete"}
+
+RESUMABLE_EXIT_REASONS = {"final_answer", "max_iterations_answered"}
+
+TOOL_BUDGET_NOTE = (
+    "Tool budget exhausted: no more tool calls are possible in this turn. Answer the "
+    "question now using only the results already gathered, and say clearly if anything "
+    "couldn't be verified."
+)
 
 DUPLICATE_CALL_ERROR = (
     "This exact call (same tool, same arguments) was already tried "
@@ -177,6 +214,11 @@ def _add_usage(totals, interaction):
 
 
 def _retryable(e):
+    if isinstance(e, interactions_errors.APIConnectionError):  # includes APITimeoutError
+        return True
+    if isinstance(e, interactions_errors.APIError):
+        code = getattr(e, "status_code", None)
+        return code is not None and (code == 429 or code >= 500)
     if isinstance(e, genai_errors.ServerError):
         return True
     if isinstance(e, genai_errors.APIError):
@@ -184,14 +226,29 @@ def _retryable(e):
     return isinstance(e, (httpx.TimeoutException, httpx.TransportError, TimeoutError, ConnectionError))
 
 
+def _status(interaction):
+    status = getattr(interaction, "status", None)
+    return None if status is None else str(status)
+
+
+def _function_calls(interaction):
+    return [s for s in (interaction.steps or []) if getattr(s, "type", None) == "function_call"]
+
+
 def _error_event(where, iteration, error_type, message, retryable):
     return {"type": "error", "where": where, "iteration": iteration, "error_type": error_type,
             "message": message, "retryable": retryable}
 
 
-def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS):
+def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS, previous_interaction_id=None):
     """Run one turn of the agent loop, yielding plain-JSON events (see the
-    module docstring). Never closes ctx -- the caller owns it."""
+    module docstring). Never closes ctx -- the caller owns it.
+
+    previous_interaction_id continues a conversation: the turn's first
+    create() chains from it (a previous turn's done.interaction_id; only
+    safe when that turn was resumable). Later calls in the turn chain from
+    this turn's own responses. system_instruction and tools are still sent
+    on every call -- the SDK doesn't document them as inherited."""
     start = time.perf_counter()
     # Step 14: (tool name, canonical-json arguments) pairs already executed
     # this turn. First occurrence goes through to call_tool(); any exact
@@ -204,16 +261,16 @@ def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS):
 
     # Stateful mode: first input is the query string; Google holds state
     # from then on, chained via previous_interaction_id.
-    previous_interaction_id = None
     current_input = query
+    turn_interaction_id = None  # this turn's latest response id, for done
 
     def done(exit_reason, iterations, error=None):
         return {
             "type": "done",
             "exit_reason": exit_reason,
             "iterations": iterations,
-            "interaction_id": previous_interaction_id,
-            "resumable": exit_reason == "final_answer",
+            "interaction_id": turn_interaction_id,
+            "resumable": exit_reason in RESUMABLE_EXIT_REASONS,
             "model_calls": model_calls,
             "usage": usage,
             "elapsed_ms": _elapsed_ms(start),
@@ -238,11 +295,10 @@ def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS):
             return
 
         model_calls += 1
-        previous_interaction_id = interaction.id
+        previous_interaction_id = turn_interaction_id = interaction.id
         _add_usage(usage, interaction)
-        status = getattr(interaction, "status", None)
-        status = None if status is None else str(status)
-        function_call_steps = [s for s in (interaction.steps or []) if getattr(s, "type", None) == "function_call"]
+        status = _status(interaction)
+        function_call_steps = _function_calls(interaction)
         responses.append({"iteration": iteration, "interaction_id": interaction.id, "status": status,
                           "function_calls": len(function_call_steps)})
 
@@ -300,6 +356,35 @@ def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS):
             })
 
         current_input = result_items
+
+    # Cap reached: send the pending results plus the budget note in one
+    # final call with function calling disabled, and answer from that.
+    final_iteration = max_iterations + 1
+    try:
+        interaction = client.interactions.create(
+            model=GEMINI_MODEL,
+            system_instruction=SYSTEM_PROMPT,
+            input=current_input + [{"type": "user_input", "content": [{"type": "text", "text": TOOL_BUDGET_NOTE}]}],
+            tools=TOOL_SCHEMAS,
+            generation_config={"tool_choice": "none"},
+            store=True,
+            previous_interaction_id=previous_interaction_id,
+        )
+    except RECOVERABLE_ERRORS:
+        interaction = None  # fall back below
+    if interaction is not None:
+        model_calls += 1
+        turn_interaction_id = interaction.id
+        _add_usage(usage, interaction)
+        status = _status(interaction)
+        function_call_steps = _function_calls(interaction)
+        responses.append({"iteration": final_iteration, "interaction_id": interaction.id, "status": status,
+                          "function_calls": len(function_call_steps)})
+        answer = interaction.output_text
+        if answer and not function_call_steps and status not in UNUSABLE_STATUSES:
+            yield {"type": "answer", "text": answer, "iteration": final_iteration}
+            yield done("max_iterations_answered", final_iteration)
+            return
 
     yield {"type": "answer", "text": FALLBACK_MESSAGE, "iteration": max_iterations}
     yield done("max_iterations_reached", max_iterations)
@@ -371,13 +456,16 @@ def _write_trace_log(record, path):
         print(f"  [trace log write failed: {e}]")
 
 
-def with_trace_log(query, events, log_path=TRACE_LOG_PATH):
+def with_trace_log(query, events, log_path=TRACE_LOG_PATH, conversation_id=None, turn=None,
+                   previous_interaction_id=None):
     """Pass events through unchanged, then append the turn's JSONL trace
     record when the stream ends -- normally, after an error event, when
     the consumer closes the stream early (exit_reason "aborted": closing
     this generator raises GeneratorExit at its yield), or when an exception
     propagates out of run_agent ("crashed"). log_path defaults to
-    logs/agent_traces.jsonl; tests pass a temporary path."""
+    logs/agent_traces.jsonl; tests pass a temporary path. conversation_id,
+    turn and previous_interaction_id are recorded as given (null for
+    single-question runs such as the eval)."""
     observer = _TurnObserver()
     start = time.perf_counter()
     reason = None
@@ -413,4 +501,7 @@ def with_trace_log(query, events, log_path=TRACE_LOG_PATH):
             "elapsed_ms": done.get("elapsed_ms", _elapsed_ms(start)),
             "error": observer.error,
             "responses": done.get("responses"),
+            "conversation_id": conversation_id,
+            "turn": turn,
+            "previous_interaction_id": previous_interaction_id,
         }, Path(log_path))

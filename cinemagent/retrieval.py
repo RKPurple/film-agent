@@ -51,6 +51,7 @@ import torch
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
+from cinemagent.chroma_client import persistent_client
 from cinemagent.chunking import QUERY_PREFIX, build_chunk_text
 from cinemagent.config import (
     CHROMA_COLLECTION_NAME,
@@ -184,7 +185,7 @@ def load_retrieval_index(verbose=False):
     if verbose:
         print(f"Loading {EMBEDDING_MODEL_NAME} and '{CHROMA_COLLECTION_NAME}' @ {CHROMA_DIR}...")
     embed_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    client = persistent_client(CHROMA_DIR)  # telemetry off -- see cinemagent/chroma_client.py
     collection = client.get_collection(CHROMA_COLLECTION_NAME)
 
     if verbose:

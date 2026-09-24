@@ -10,6 +10,7 @@ from google import genai
 from cinemagent.agent import collect, run_agent, with_trace_log
 from cinemagent.citations import film_label, resolve_citations
 from cinemagent.config import ENRICHED_JSON, GEMINI_MODEL
+from cinemagent.conversation import Conversation
 from cinemagent.tools import build_tool_context, close_tool_context
 
 EVAL_DIR = Path(__file__).resolve().parent
@@ -165,11 +166,154 @@ def grade_question(question, trace_steps, answer=None):
             "detail": "no ground truth -- grade manual_score by hand"}
 
 
+def _run_single_question(q, client, ctx):
+    """One question, one fresh turn (no conversation metadata)."""
+    try:
+        answer, trace_steps, done = collect(with_trace_log(q["query"], run_agent(q["query"], client, ctx)))
+    except Exception as e:
+        # A programming error propagated out of the agent loop
+        # (Gemini API errors don't raise -- they end the turn with
+        # an error event, handled below). One bad question shouldn't
+        # cost the results already collected for every question run
+        # before it -- record this one as failed and move on.
+        print(f"  -> ERROR: {type(e).__name__}: {e}")
+        return {
+            "id": q["id"],
+            "category": q["category"],
+            "query": q["query"],
+            "answer": None,
+            "tool_call_count": 0,
+            "trace_steps": [],
+            "grade": {
+                "routing_correct": None,
+                "answer_correct": None,
+                "detail": f"question raised {type(e).__name__}: {e}",
+            },
+            "manual_score": None,
+        }
+
+    if done and done["exit_reason"] == "error":
+        # The loop itself failed (e.g. a Gemini API error such as
+        # rate limiting -- agent.py doesn't retry). Keep the partial
+        # trace but don't grade it.
+        err = done["error"]
+        print(f"  -> ERROR in {err['where']}: {err['error_type']}: {err['message']}")
+        return {
+            "id": q["id"],
+            "category": q["category"],
+            "query": q["query"],
+            "answer": None,
+            "tool_call_count": len(trace_steps),
+            "trace_steps": trace_steps,
+            "grade": {
+                "routing_correct": None,
+                "answer_correct": None,
+                "detail": f"agent loop error in {err['where']}: {err['error_type']}: {err['message']}",
+            },
+            "manual_score": None,
+        }
+
+    grade = grade_question(q, trace_steps, answer)
+
+    if grade["answer_correct"] is True:
+        status = "PASS"
+    elif grade["answer_correct"] is False:
+        status = "FAIL"
+    else:
+        status = "MANUAL"
+    print(f"  -> {status}  (routing_correct={grade['routing_correct']})")
+    print(f"  answer: {answer}")
+
+    return {
+        "id": q["id"],
+        "category": q["category"],
+        "query": q["query"],
+        "answer": answer,
+        "tool_call_count": len(trace_steps),
+        "trace_steps": trace_steps,
+        "grade": grade,
+        "manual_score": None,  # fill in by hand for MANUAL entries after the run
+    }
+
+
+MULTI_TURN_OK_EXITS = {"final_answer", "max_iterations_answered"}
+
+
+def _structural_check(turns):
+    """Automatic multi-turn checks, separate from manual grading: every turn
+    completed (final_answer or max_iterations_answered), and each turn
+    chained from the previous turn's final interaction (turn 1 from none)."""
+    problems = []
+    for i, turn in enumerate(turns, start=1):
+        done = turn["done"] or {}
+        if done.get("exit_reason") not in MULTI_TURN_OK_EXITS:
+            problems.append(f"turn {i}: exit_reason {done.get('exit_reason')!r}")
+        expected_prev = (turns[i - 2]["done"] or {}).get("interaction_id") if i > 1 else None
+        if turn["previous_interaction_id"] != expected_prev:
+            problems.append(f"turn {i}: previous_interaction_id {turn['previous_interaction_id']!r} "
+                            f"!= previous turn's interaction_id {expected_prev!r}")
+    return {"passed": not problems, "problems": problems}
+
+
+def _run_multi_turn_question(q, client, ctx):
+    """A question with "turns": one fresh Conversation, each turn through
+    conversation.ask() and collect(). Graded manually; the structural check
+    is recorded alongside. A turn that errors doesn't stop the question
+    (the next turn chains from the last completed one); a propagated
+    exception does. "info_tool_call_count_turns" lists turns whose tool-call
+    count is reported as information (not pass/fail)."""
+    conversation = Conversation(client, ctx)
+    turns, crashed = [], None
+    for i, message in enumerate(q["turns"], start=1):
+        previous = conversation.last_interaction_id
+        print(f"  [turn {i}] {message}")
+        try:
+            answer, trace_steps, done = collect(conversation.ask(message))
+        except Exception as e:
+            crashed = f"turn {i} raised {type(e).__name__}: {e}"
+            print(f"  -> ERROR: {crashed}")
+            break
+        turns.append({
+            "query": message,
+            "answer": answer,
+            "trace_steps": trace_steps,
+            "done": done and {k: done[k] for k in ("exit_reason", "resumable", "interaction_id", "usage")},
+            "previous_interaction_id": previous,
+        })
+        print(f"    -> {done and done['exit_reason']}, tools: {[s['tool'] for s in trace_steps] or '(none)'}")
+        print(f"    answer: {answer}")
+
+    structural = _structural_check(turns)
+    if crashed:
+        structural["passed"] = False
+        structural["problems"].append(crashed)
+    info = {f"turn_{n}_tool_calls": len(turns[n - 1]["trace_steps"])
+            for n in q.get("info_tool_call_count_turns", []) if n <= len(turns)}
+    print(f"  -> MANUAL  (structural check: {'PASS' if structural['passed'] else 'FAIL'}"
+          + (f"; {', '.join(structural['problems'])}" if structural["problems"] else "")
+          + (f"; info: {info}" if info else "") + ")")
+    all_steps = [step for turn in turns for step in turn["trace_steps"]]
+    return {
+        "id": q["id"],
+        "category": q["category"],
+        "query": " / ".join(q["turns"]),
+        "answer": turns[-1]["answer"] if turns else None,
+        "tool_call_count": len(all_steps),
+        "trace_steps": all_steps,
+        "turns": turns,
+        "structural_check": structural,
+        "info": info,
+        "grade": {"routing_correct": None, "answer_correct": None,
+                  "detail": "multi-turn -- grade manual_score by hand"},
+        "manual_score": None,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ids", type=str, default=None,
                          help="Comma-separated question ids to run (default: all). Takes priority over --category.")
-    parser.add_argument("--category", type=str, default=None, choices=["checkable", "fuzzy", "adversarial"],
+    parser.add_argument("--category", type=str, default=None, choices=["checkable", "fuzzy", "adversarial", "multiturn"],
                          help="Only run questions in this category (default: all)")
     parser.add_argument("--list", action="store_true",
                          help="Print every question id, category and grading mode, then exit without running anything")
@@ -180,7 +324,8 @@ def main():
 
     if args.list:
         for q in questions:
-            print(f"{q['id']:35s} {q['category']:12s} {q['grading']}")
+            turns = f"  ({len(q['turns'])} turns)" if "turns" in q else ""
+            print(f"{q['id']:35s} {q['category']:12s} {q['grading']}{turns}")
         return
 
     filtered = bool(args.ids or args.category)
@@ -208,75 +353,12 @@ def main():
     entries = []
     try:
         for q in questions:
-            print(f"\n=== [{q['id']}] ({q['category']}) {q['query']}")
-            try:
-                answer, trace_steps, done = collect(with_trace_log(q["query"], run_agent(q["query"], client, ctx)))
-            except Exception as e:
-                # A programming error propagated out of the agent loop
-                # (Gemini API errors don't raise -- they end the turn with
-                # an error event, handled below). One bad question shouldn't
-                # cost the results already collected for every question run
-                # before it -- record this one as failed and move on.
-                print(f"  -> ERROR: {type(e).__name__}: {e}")
-                entries.append({
-                    "id": q["id"],
-                    "category": q["category"],
-                    "query": q["query"],
-                    "answer": None,
-                    "tool_call_count": 0,
-                    "trace_steps": [],
-                    "grade": {
-                        "routing_correct": None,
-                        "answer_correct": None,
-                        "detail": f"question raised {type(e).__name__}: {e}",
-                    },
-                    "manual_score": None,
-                })
-                continue
-
-            if done and done["exit_reason"] == "error":
-                # The loop itself failed (e.g. a Gemini API error such as
-                # rate limiting -- agent.py doesn't retry). Keep the partial
-                # trace but don't grade it.
-                err = done["error"]
-                print(f"  -> ERROR in {err['where']}: {err['error_type']}: {err['message']}")
-                entries.append({
-                    "id": q["id"],
-                    "category": q["category"],
-                    "query": q["query"],
-                    "answer": None,
-                    "tool_call_count": len(trace_steps),
-                    "trace_steps": trace_steps,
-                    "grade": {
-                        "routing_correct": None,
-                        "answer_correct": None,
-                        "detail": f"agent loop error in {err['where']}: {err['error_type']}: {err['message']}",
-                    },
-                    "manual_score": None,
-                })
-                continue
-
-            grade = grade_question(q, trace_steps, answer)
-
-            if grade["answer_correct"] is True:
-                status = "PASS"
-            elif grade["answer_correct"] is False:
-                status = "FAIL"
+            if "turns" in q:
+                print(f"\n=== [{q['id']}] ({q['category']}) {len(q['turns'])}-turn conversation")
+                entries.append(_run_multi_turn_question(q, client, ctx))
             else:
-                status = "MANUAL"
-            print(f"  -> {status}  (routing_correct={grade['routing_correct']})")
-            print(f"  answer: {answer}")
-
-            entries.append({
-                "id": q["id"],
-                "category": q["category"],
-                "query": q["query"],
-                "answer": answer,
-                "tool_call_count": len(trace_steps),
-                "trace_steps": trace_steps,
-                "grade": grade,
-                "manual_score": None,  # fill in by hand for MANUAL entries after the run
-            })
+                print(f"\n=== [{q['id']}] ({q['category']}) {q['query']}")
+                entries.append(_run_single_question(q, client, ctx))
     finally:
         close_tool_context(ctx)
 
@@ -297,7 +379,11 @@ def main():
     print(f"Auto-graded: {n_pass}/{len(auto_graded)} answer-correct")
     print(f"Routing correct: {n_routing_correct}/{len(routing_checked)}")
     print(f"Avg tool calls per question: {avg_calls:.1f}")
-    print(f"{n_manual} question(s) need manual_score filled in by hand (fuzzy/adversarial).")
+    print(f"{n_manual} question(s) need manual_score filled in by hand (fuzzy/adversarial/multiturn).")
+    multi = [e for e in entries if "structural_check" in e]
+    if multi:
+        n_ok = sum(1 for e in multi if e["structural_check"]["passed"])
+        print(f"Multi-turn structural checks: {n_ok}/{len(multi)} passed")
     print(f"Full results written to {out_path}")
 
 

@@ -29,9 +29,9 @@ requirements.txt installed
 
 import json
 
-import chromadb
 from sentence_transformers import SentenceTransformer
 
+from cinemagent.chroma_client import persistent_client
 from cinemagent.chunking import build_chunk_text
 from cinemagent.config import CHROMA_COLLECTION_NAME, CHROMA_DIR, EMBEDDING_MODEL_NAME, ENRICHED_JSON
 
@@ -73,7 +73,7 @@ def main():
     print(f"Embedding {len(documents)} film chunks (documents get no query prefix)...")
     embeddings = model.encode(documents, show_progress_bar=True, normalize_embeddings=True).tolist()
 
-    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    client = persistent_client(CHROMA_DIR)  # telemetry off -- see cinemagent/chroma_client.py
 
     try:
         client.delete_collection(CHROMA_COLLECTION_NAME)

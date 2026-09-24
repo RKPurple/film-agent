@@ -195,7 +195,9 @@ TOOL_SCHEMAS = [
             "already_watched so it's clear whether it's already in the local "
             "corpus (in which case search_my_history/filter_by_* have richer "
             "data on it) or genuinely new. Returns a tmdb_id -- pass that id to "
-            "tmdb_recommendations to find films similar to this one."
+            "tmdb_recommendations to find films similar to this one. Returns no "
+            "rating. To check several films, call it for all of them in the same "
+            "step, not one per step."
         ),
         "parameters": {
             "type": "object",
@@ -219,7 +221,9 @@ TOOL_SCHEMAS = [
             "like X' style questions. Results are tagged already_watched but are "
             "NOT pre-filtered -- exclude already-watched candidates and rank the "
             "rest yourself based on fit (genre/vibe similarity from the "
-            "overviews, vote_average) before recommending them."
+            "overviews, vote_average) before recommending them. vote_average is "
+            "TMDB's audience average (0-10); the candidate list is fixed and can't "
+            "be sorted or filtered by rating."
         ),
         "parameters": {
             "type": "object",

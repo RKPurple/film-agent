@@ -305,5 +305,60 @@
     "grading": "manual",
     "ground_truth": null,
     "notes": "No ballet film is in the watch history (verified during calibration labeling), but it's a near miss: a film about obsessive artistic perfection in another art form may come up. Offering one as clearly labeled 'related but not ballet' is acceptable; presenting it as a ballet film is a fail."
+  },
+  {
+    "id": "multiturn_filter_previous",
+    "category": "multiturn",
+    "turns": ["What westerns have I watched?", "Which of those have Samuel L. Jackson in them?"],
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Tests filtering a previous turn's results by a new constraint. Pass: turn 2 identifies exactly Django Unchained and The Hateful Eight (naming Rango as not qualifying is fine)."
+  },
+  {
+    "id": "multiturn_topic_switch",
+    "category": "multiturn",
+    "turns": ["What movies with Idris Elba have I watched?", "What have I watched that made me cry?"],
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Tests that an unrelated follow-up doesn't inherit the previous turn's constraint. Pass: turn 2 carries no Idris Elba constraint."
+  },
+  {
+    "id": "multiturn_correction_carryover",
+    "category": "multiturn",
+    "turns": ["What comedies have I rated highly?", "Actually I meant 4.5 star minimum", "What are some dramas I rated highly?"],
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "info_tool_call_count_turns": [2],
+    "notes": "Tests that a clarified term persists for the rest of the conversation. Pass: turn 2 re-filters to 4.5+ (ideally without new tool calls, reported automatically as info); turn 3 uses 4.5+ for dramas."
+  },
+  {
+    "id": "multiturn_reference_vibe",
+    "category": "multiturn",
+    "turns": ["What have I watched that felt uneasy or unsettling?", "Find more like the second one in my history"],
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Tests resolving an ordinal reference to the previous answer and respecting 'in my history'. Pass: turn 2 correctly resolves 'the second one'; no film title appears in any search_my_history query; only watched films are suggested."
+  },
+  {
+    "id": "multiturn_ambiguity",
+    "category": "multiturn",
+    "turns": ["What are some movies like Trap?", "What about something lower rated similar to Trap?"],
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Tests handling a request the tools can't serve / an ambiguous term ('lower rated' = Rohan's rating or TMDB's audience score). Pass: turn 2 asks for clarification or states the rating limitation instead of improvising with many lookups."
+  },
+  {
+    "id": "multiturn_refine_rec",
+    "category": "multiturn",
+    "turns": ["Recommend something like Parasite that I haven't seen", "Something a bit less dark"],
+    "expected_tools": null,
+    "grading": "manual",
+    "ground_truth": null,
+    "notes": "Tests refining a recommendation without one-by-one verification. Pass: no turn hits the iteration cap; any films the agent suggests from its own knowledge are verified together in one parallel step."
   }
 ]
