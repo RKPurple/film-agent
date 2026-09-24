@@ -7,7 +7,7 @@ from pathlib import Path
 
 from google import genai
 
-from cinemagent.agent import run_agent
+from cinemagent.agent import collect, run_agent, with_trace_log
 from cinemagent.citations import film_label, resolve_citations
 from cinemagent.config import ENRICHED_JSON, GEMINI_MODEL
 from cinemagent.tools import build_tool_context, close_tool_context
@@ -210,17 +210,13 @@ def main():
         for q in questions:
             print(f"\n=== [{q['id']}] ({q['category']}) {q['query']}")
             try:
-                answer, trace_steps = run_agent(
-                    q["query"], client, ctx, trace=False, log_trace=True, return_trace=True
-                )
+                answer, trace_steps, done = collect(with_trace_log(q["query"], run_agent(q["query"], client, ctx)))
             except Exception as e:
-                # A single question's failure (e.g. agent.py's own retry
-                # budget for LLM API rate limiting exhausted, or anything
-                # else unexpected) shouldn't cost the results already
-                # collected
-                # for every question run before it -- record this one as
-                # failed and move on, rather than letting one bad question
-                # take the whole run down with it.
+                # A programming error propagated out of the agent loop
+                # (Gemini API errors don't raise -- they end the turn with
+                # an error event, handled below). One bad question shouldn't
+                # cost the results already collected for every question run
+                # before it -- record this one as failed and move on.
                 print(f"  -> ERROR: {type(e).__name__}: {e}")
                 entries.append({
                     "id": q["id"],
@@ -233,6 +229,28 @@ def main():
                         "routing_correct": None,
                         "answer_correct": None,
                         "detail": f"question raised {type(e).__name__}: {e}",
+                    },
+                    "manual_score": None,
+                })
+                continue
+
+            if done and done["exit_reason"] == "error":
+                # The loop itself failed (e.g. a Gemini API error such as
+                # rate limiting -- agent.py doesn't retry). Keep the partial
+                # trace but don't grade it.
+                err = done["error"]
+                print(f"  -> ERROR in {err['where']}: {err['error_type']}: {err['message']}")
+                entries.append({
+                    "id": q["id"],
+                    "category": q["category"],
+                    "query": q["query"],
+                    "answer": None,
+                    "tool_call_count": len(trace_steps),
+                    "trace_steps": trace_steps,
+                    "grade": {
+                        "routing_correct": None,
+                        "answer_correct": None,
+                        "detail": f"agent loop error in {err['where']}: {err['error_type']}: {err['message']}",
                     },
                     "manual_score": None,
                 })

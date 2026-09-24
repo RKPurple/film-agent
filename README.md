@@ -149,6 +149,10 @@ python3 eval/run_eval.py
 python3 eval/show_results.py  # pretty-print the most recent run
 ```
 
+## Tests
+
+`pip install -r requirements-dev.txt`, then `pytest` from the repo root. The tests drive the agent loop with a scripted fake Gemini client and fake tools (no network, Gemini, Postgres or models; sockets are blocked during the run), covering the event sequence, parallel calls, the duplicate-call guard, the iteration cap, API/network/unusable-response errors, early close, and the trace-record and `collect()` shapes.
+
 ## Eval results
 
 The eval set has 24 questions split into three categories: **checkable** (10 structured questions with a known-correct expected answer, auto-graded against Postgres directly), **fuzzy** (6 recommendation and vibe/theme questions, rated manually since there's no single correct answer), and **adversarial** (8 deliberately ambiguous or trap questions, e.g. asking about "documentaries" or werewolf movies when none exist in the watch history, to check the system reports that honestly rather than fabricating one).

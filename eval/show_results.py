@@ -33,6 +33,7 @@ def find_run(arg):
 
 
 FREE_ROUTING = "n/a (free routing)"
+NO_ANSWER = "(no answer: error)"  # run_eval stores answer None when a question raised
 
 
 def fmt_bool(v):
@@ -116,7 +117,9 @@ def main():
                 print(f"  note: {g['detail']}")
             tools = " -> ".join(s["tool"] for s in r.get("trace_steps", [])) or "(none)"
             print(f"  tools: {tools}")
-            print(textwrap.indent(textwrap.fill(r.get("answer", "").replace("\n", " "), 90), "  A: "))
+            answer = r.get("answer")
+            answer = answer.replace("\n", " ") if answer is not None else NO_ANSWER
+            print(textwrap.indent(textwrap.fill(answer, 90), "  A: "))
 
     if show_traces:
         print("\nFull traces")

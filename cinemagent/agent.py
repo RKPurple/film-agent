@@ -11,6 +11,19 @@ How it works:
   the model returns a plain answer or AGENT_MAX_ITERATIONS (a safety cap,
   from cinemagent.config) hits.
   SYSTEM_PROMPT carries the which-tool-for-which-question guidance.
+- run_agent() is a generator that only YIELDS plain-JSON events -- it
+  prints nothing and logs nothing, so the same stream can feed the CLI,
+  the eval harness, and a server streaming it over SSE:
+    tool_call    {id, iteration, index, name, arguments, model_call_id}
+    tool_result  {id, iteration, name, result, blocked_duplicate, duration_ms}
+    answer       {text, iteration}
+    error        {where, iteration, error_type, message, retryable}
+    done         {exit_reason, iterations, interaction_id, resumable,
+                  model_calls, usage, elapsed_ms, responses, error}
+  done is always the last event; exit_reason is final_answer,
+  max_iterations_reached or error. Consumers: collect() rebuilds
+  (answer, trace_steps, done); with_trace_log() passes events through and
+  appends the JSONL trace record when the stream ends.
 - Citations are title + year (no bracket-number scheme, since one turn may
   combine results from several tools).
 
@@ -20,9 +33,20 @@ Design notes:
   against a model that mis-parses a failure and repeats the same call.
   SYSTEM_PROMPT distinguishes an {"error": ...} result (call failed, don't
   repeat) from an empty list (valid "nothing matches").
-- Every run_agent() call appends one untruncated JSON record to
-  logs/agent_traces.jsonl (query, model, iterations, exit reason, per-step
-  tool/args/result/blocked flag).
+- Errors: tool exceptions are already caught by call_tool() and returned
+  to the model as {"error": ...} results. Gemini API errors
+  (google.genai.errors.APIError) and network/timeout errors, plus a
+  model response with no function calls that is unusable (failed /
+  cancelled / incomplete status, or no text), yield an error event and
+  then done(exit_reason="error") instead of raising. Anything else is a
+  programming error and propagates -- turning a code bug into a polite
+  error event would hide it.
+- resumable is True only for final_answer: after the iteration cap, an
+  error or an abort, the last stored interaction requested tool calls whose
+  results were never sent back, so chaining a new turn from it isn't safe.
+- Every with_trace_log()-wrapped turn appends one untruncated JSON record
+  to logs/agent_traces.jsonl, including early closes (exit_reason
+  "aborted") and propagated exceptions ("crashed").
 - Tuning: SYSTEM_PROMPT forbids passing a film title as
   search_my_history query text -- a literal title match dominates the
   hybrid retrieval's BM25 component and crowds out genuine thematic matches
@@ -30,7 +54,12 @@ Design notes:
 """
 
 import json
+import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+import httpx
+from google.genai import errors as genai_errors
 
 from cinemagent.config import AGENT_MAX_ITERATIONS, GEMINI_MODEL, LOGS_DIR
 from cinemagent.tools import TOOL_SCHEMAS, call_tool
@@ -40,31 +69,8 @@ FALLBACK_MESSAGE = (
     "something about the question may need to be broken down differently."
 )
 
-
-def _log_cache_usage(interaction):
-    """Best-effort one-line prompt-cache report. Checks a few plausible
-    attribute spellings (the field name isn't documented) and silently
-    no-ops if none are present -- must never break a real completion."""
-    usage = getattr(interaction, "usage", None) or getattr(interaction, "usage_metadata", None)
-    if usage is None:
-        return
-    cached = getattr(usage, "cached_tokens", None)
-    if cached is None:
-        cached = getattr(usage, "cached_content_token_count", None)
-    if cached is None:
-        return
-    total = (
-        getattr(usage, "total_tokens", None)
-        or getattr(usage, "total_token_count", None)
-        or getattr(usage, "prompt_tokens", None)
-        or getattr(usage, "prompt_token_count", None)
-        or 0
-    )
-    pct = (cached / total * 100) if total else 0
-    print(f"  [prompt cache: {cached}/{total} tokens cached ({pct:.0f}%)]")
-
-# Step 15: one JSON record per run_agent() call, appended (never overwritten)
-# so history accumulates across runs -- see module docstring.
+# Step 15: one JSON record per turn, appended (never overwritten) so
+# history accumulates across runs -- see module docstring.
 TRACE_LOG_PATH = LOGS_DIR / "agent_traces.jsonl"
 
 SYSTEM_PROMPT = (
@@ -128,68 +134,145 @@ SYSTEM_PROMPT = (
 )
 
 
-def _write_trace_log(query, steps, iterations, exit_reason, answer):
-    """Append one JSON record for this run_agent() call. Never raises on a
-    logging failure -- a broken trace log shouldn't take down an agent run."""
-    try:
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "model": GEMINI_MODEL,
-            "query": query,
-            "iterations": iterations,
-            "exit_reason": exit_reason,
-            "steps": steps,
-            "answer": answer,
-        }
-        with open(TRACE_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, default=str) + "\n")
-    except OSError as e:
-        print(f"  [trace log write failed: {e}]")
+# done.usage key -> the SDK's Usage attribute, summed over every model call
+# in the turn. Input tokens are counted once per call (each iteration
+# re-reads the stored context), so the sum is the billed total.
+USAGE_FIELDS = {
+    "input_tokens": "total_input_tokens",
+    "output_tokens": "total_output_tokens",
+    "thought_tokens": "total_thought_tokens",
+    "cached_tokens": "total_cached_tokens",
+    "tool_use_tokens": "total_tool_use_tokens",
+    "total_tokens": "total_tokens",
+}
+
+# Loop failures that become an error event instead of raising -- see the
+# module docstring. httpx is the SDK's transport.
+RECOVERABLE_ERRORS = (genai_errors.APIError, httpx.HTTPError, TimeoutError, ConnectionError)
+
+UNUSABLE_STATUSES = {"failed", "cancelled", "incomplete"}
+
+DUPLICATE_CALL_ERROR = (
+    "This exact call (same tool, same arguments) was already tried "
+    "earlier in this conversation and will return the same result -- "
+    "do not repeat it. Use a different tool, different arguments, or "
+    "tell the user honestly that this couldn't be resolved."
+)
 
 
-def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS, trace=True, log_trace=True,
-              return_trace=False):
+def _elapsed_ms(start):
+    return round((time.perf_counter() - start) * 1000)
+
+
+def _add_usage(totals, interaction):
+    """Add one response's token usage into totals; a key stays None until
+    the SDK reports it at least once."""
+    usage = getattr(interaction, "usage", None)
+    if usage is None:
+        return
+    for key, attr in USAGE_FIELDS.items():
+        value = getattr(usage, attr, None)
+        if value is not None:
+            totals[key] = (totals[key] or 0) + value
+
+
+def _retryable(e):
+    if isinstance(e, genai_errors.ServerError):
+        return True
+    if isinstance(e, genai_errors.APIError):
+        return getattr(e, "code", None) == 429
+    return isinstance(e, (httpx.TimeoutException, httpx.TransportError, TimeoutError, ConnectionError))
+
+
+def _error_event(where, iteration, error_type, message, retryable):
+    return {"type": "error", "where": where, "iteration": iteration, "error_type": error_type,
+            "message": message, "retryable": retryable}
+
+
+def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS):
+    """Run one turn of the agent loop, yielding plain-JSON events (see the
+    module docstring). Never closes ctx -- the caller owns it."""
+    start = time.perf_counter()
     # Step 14: (tool name, canonical-json arguments) pairs already executed
-    # this run. First occurrence goes through to call_tool(); any exact
+    # this turn. First occurrence goes through to call_tool(); any exact
     # repeat is short-circuited with a synthetic error.
     seen_calls = set()
-    # Step 15: one entry per tool call (live or duplicate-blocked), flushed
-    # to TRACE_LOG_PATH when the run concludes.
-    trace_steps = []
+    call_count = 0
+    model_calls = 0
+    usage = dict.fromkeys(USAGE_FIELDS)
+    responses = []  # per model response: iteration, interaction_id, status, function_calls
 
     # Stateful mode: first input is the query string; Google holds state
     # from then on, chained via previous_interaction_id.
     previous_interaction_id = None
     current_input = query
 
-    for iteration in range(1, max_iterations + 1):
-        interaction = client.interactions.create(
-            model=GEMINI_MODEL,
-            system_instruction=SYSTEM_PROMPT,
-            input=current_input,
-            tools=TOOL_SCHEMAS,
-            store=True,
-            previous_interaction_id=previous_interaction_id,
-        )
-        previous_interaction_id = interaction.id
-        _log_cache_usage(interaction)
+    def done(exit_reason, iterations, error=None):
+        return {
+            "type": "done",
+            "exit_reason": exit_reason,
+            "iterations": iterations,
+            "interaction_id": previous_interaction_id,
+            "resumable": exit_reason == "final_answer",
+            "model_calls": model_calls,
+            "usage": usage,
+            "elapsed_ms": _elapsed_ms(start),
+            "responses": responses,
+            "error": error,
+        }
 
-        function_call_steps = [s for s in interaction.steps if getattr(s, "type", None) == "function_call"]
+    for iteration in range(1, max_iterations + 1):
+        try:
+            interaction = client.interactions.create(
+                model=GEMINI_MODEL,
+                system_instruction=SYSTEM_PROMPT,
+                input=current_input,
+                tools=TOOL_SCHEMAS,
+                store=True,
+                previous_interaction_id=previous_interaction_id,
+            )
+        except RECOVERABLE_ERRORS as e:
+            error = _error_event("model_call", iteration, type(e).__name__, str(e), _retryable(e))
+            yield error
+            yield done("error", iteration, error)
+            return
+
+        model_calls += 1
+        previous_interaction_id = interaction.id
+        _add_usage(usage, interaction)
+        status = getattr(interaction, "status", None)
+        status = None if status is None else str(status)
+        function_call_steps = [s for s in (interaction.steps or []) if getattr(s, "type", None) == "function_call"]
+        responses.append({"iteration": iteration, "interaction_id": interaction.id, "status": status,
+                          "function_calls": len(function_call_steps)})
 
         if not function_call_steps:
             answer = interaction.output_text
-            if log_trace:
-                _write_trace_log(query, trace_steps, iteration, "final_answer", answer)
-            if return_trace:
-                return answer, trace_steps
-            return answer
+            if status in UNUSABLE_STATUSES or not answer:
+                detail = f"status={status!r}, output_text={'empty' if not answer else 'present'}"
+                if getattr(interaction, "errors", None):
+                    detail += f", errors={[str(err) for err in interaction.errors]}"
+                error = _error_event("model_response", iteration, "UnusableResponse",
+                                     f"Model response had no function calls and no usable answer ({detail})",
+                                     status in ("cancelled", "incomplete"))
+                yield error
+                yield done("error", iteration, error)
+                return
+            yield {"type": "answer", "text": answer, "iteration": iteration}
+            yield done("final_answer", iteration)
+            return
 
         result_items = []
-        for fc in function_call_steps:
+        for index, fc in enumerate(function_call_steps):
+            call_count += 1
+            call_id = f"c{call_count}"
             name = fc.name
-            blocked_duplicate = False
             arguments = dict(fc.arguments) if fc.arguments else {}
+            yield {"type": "tool_call", "id": call_id, "iteration": iteration, "index": index,
+                   "name": name, "arguments": arguments, "model_call_id": fc.id}
+
+            call_start = time.perf_counter()
+            blocked_duplicate = False
             try:
                 signature = (name, json.dumps(arguments, sort_keys=True, default=str))
             except TypeError as e:
@@ -197,33 +280,17 @@ def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS, trace=Tru
                 # wasn't serializable for the duplicate-call signature.
                 # Treat as a failed call rather than letting it kill the run.
                 result = {"error": f"Couldn't canonicalize arguments for duplicate-call tracking: {e}"}
-                logged_arguments = arguments
             else:
-                logged_arguments = arguments
                 if signature in seen_calls:
                     blocked_duplicate = True
-                    result = {
-                        "error": (
-                            "This exact call (same tool, same arguments) was already tried "
-                            "earlier in this conversation and will return the same result -- "
-                            "do not repeat it. Use a different tool, different arguments, or "
-                            "tell the user honestly that this couldn't be resolved."
-                        )
-                    }
+                    result = {"error": DUPLICATE_CALL_ERROR}
                 else:
                     seen_calls.add(signature)
                     result = call_tool(name, arguments, ctx)
 
-            trace_steps.append({
-                "tool": name,
-                "arguments": logged_arguments,
-                "result": result,
-                "blocked_duplicate": blocked_duplicate,
-            })
-
-            if trace:
-                preview = json.dumps(result, default=str)[:200]
-                print(f"  [iter {iteration}] {name}({arguments}) -> {preview}")
+            yield {"type": "tool_result", "id": call_id, "iteration": iteration, "name": name,
+                   "result": result, "blocked_duplicate": blocked_duplicate,
+                   "duration_ms": _elapsed_ms(call_start)}
 
             result_items.append({
                 "type": "function_result",
@@ -234,8 +301,116 @@ def run_agent(query, client, ctx, max_iterations=AGENT_MAX_ITERATIONS, trace=Tru
 
         current_input = result_items
 
-    if log_trace:
-        _write_trace_log(query, trace_steps, max_iterations, "max_iterations_reached", FALLBACK_MESSAGE)
-    if return_trace:
-        return FALLBACK_MESSAGE, trace_steps
-    return FALLBACK_MESSAGE
+    yield {"type": "answer", "text": FALLBACK_MESSAGE, "iteration": max_iterations}
+    yield done("max_iterations_reached", max_iterations)
+
+
+class _TurnObserver:
+    """Accumulates one turn's events into trace steps, answer, error and
+    done -- shared by collect() and with_trace_log()."""
+
+    def __init__(self):
+        self.calls = {}
+        self.steps = []          # trace-log superset of trace_steps
+        self.answer = None
+        self.error = None
+        self.done = None
+        self.last_iteration = None
+
+    def observe(self, event):
+        kind = event["type"]
+        if "iteration" in event:
+            self.last_iteration = event["iteration"]
+        if kind == "tool_call":
+            self.calls[event["id"]] = event
+        elif kind == "tool_result":
+            call = self.calls[event["id"]]
+            self.steps.append({
+                "tool": call["name"],
+                "arguments": call["arguments"],
+                "result": event["result"],
+                "blocked_duplicate": event["blocked_duplicate"],
+                "id": event["id"],
+                "iteration": event["iteration"],
+                "index": call["index"],
+                "duration_ms": event["duration_ms"],
+            })
+        elif kind == "answer":
+            self.answer = event["text"]
+        elif kind == "error":
+            self.error = event
+        elif kind == "done":
+            self.done = event
+
+    def trace_steps(self):
+        """Exactly the pre-generator trace_steps shape: four keys per step."""
+        return [{"tool": s["tool"], "arguments": s["arguments"], "result": s["result"],
+                 "blocked_duplicate": s["blocked_duplicate"]} for s in self.steps]
+
+
+def collect(events):
+    """Drain an event stream into (answer, trace_steps, done). trace_steps
+    has exactly the pre-generator shape ({tool, arguments, result,
+    blocked_duplicate} per call), so eval grading and stored results are
+    unchanged. answer is None if the turn errored; done is None only if
+    the stream ended without one."""
+    observer = _TurnObserver()
+    for event in events:
+        observer.observe(event)
+    return observer.answer, observer.trace_steps(), observer.done
+
+
+def _write_trace_log(record, path):
+    """Append one JSON record to path. Never raises on a logging failure --
+    a broken trace log shouldn't take down an agent run."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except OSError as e:
+        print(f"  [trace log write failed: {e}]")
+
+
+def with_trace_log(query, events, log_path=TRACE_LOG_PATH):
+    """Pass events through unchanged, then append the turn's JSONL trace
+    record when the stream ends -- normally, after an error event, when
+    the consumer closes the stream early (exit_reason "aborted": closing
+    this generator raises GeneratorExit at its yield), or when an exception
+    propagates out of run_agent ("crashed"). log_path defaults to
+    logs/agent_traces.jsonl; tests pass a temporary path."""
+    observer = _TurnObserver()
+    start = time.perf_counter()
+    reason = None
+    try:
+        for event in events:
+            observer.observe(event)
+            yield event
+    except GeneratorExit:
+        reason = "aborted"
+        raise
+    except BaseException:
+        reason = "crashed"
+        raise
+    finally:
+        # Closing this wrapper doesn't close the inner generator by itself.
+        if hasattr(events, "close"):
+            events.close()
+        done = observer.done or {}
+        if reason is None:
+            reason = done.get("exit_reason", "aborted")
+        _write_trace_log({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "model": GEMINI_MODEL,
+            "query": query,
+            "iterations": done.get("iterations", observer.last_iteration),
+            "exit_reason": reason,
+            "steps": observer.steps,
+            "answer": observer.answer,
+            "interaction_id": done.get("interaction_id"),
+            "resumable": done.get("resumable", False),
+            "usage": done.get("usage"),
+            "model_calls": done.get("model_calls"),
+            "elapsed_ms": done.get("elapsed_ms", _elapsed_ms(start)),
+            "error": observer.error,
+            "responses": done.get("responses"),
+        }, Path(log_path))

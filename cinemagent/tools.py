@@ -54,6 +54,10 @@ def build_tool_context(tmdb_api_key=None):
     Chroma collection, reranker) and the Postgres connection."""
     index = load_retrieval_index()
     conn = queries.get_connection()
+    # Every agent query is read-only. Autocommit means a failed statement
+    # can't leave the long-lived connection in an aborted transaction that
+    # breaks every later SQL tool call in the session.
+    conn.autocommit = True
     return ToolContext(conn, index, tmdb_api_key)
 
 
