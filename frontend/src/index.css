@@ -1,0 +1,150 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens -- the one place colors, fonts and radii are defined. Each
+ * becomes a Tailwind utility (bg-surface-1, text-muted, border-line,
+ * text-marquee, font-display, ...).
+ *
+ * Palette: a soft charcoal (dark, but not black) with lighter charcoal
+ * surfaces raised above it, warm off-white text, hairline borders, and one
+ * accent: a marquee-bulb amber. Deliberately not Letterboxd's
+ * green/orange/blue.
+ */
+@theme {
+  --font-display: 'Fraunces Variable', ui-serif, Georgia, 'Times New Roman', serif;
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  --color-bg: #1f2023;
+  --color-surface-1: #26272b;   /* panels */
+  --color-surface-2: #2d2e33;   /* raised: cards, inputs */
+  --color-surface-3: #36373d;   /* hover / active */
+  --color-line: #36373c;        /* subtle borders */
+  --color-line-strong: #494b52;
+  --color-text: #ede9e3;
+  --color-muted: #aba7a0;
+  --color-faint: #7d7a75;
+  --color-marquee: #f0b44c;     /* the accent */
+  --color-marquee-strong: #ffc766;
+  --color-marquee-ink: #1a1206;  /* text on the accent */
+  --color-danger: #d56a5c;
+
+  --radius-panel: 0.875rem;
+}
+
+@layer base {
+  /* The page itself never scrolls; only the answer panel does. */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  #root {
+    height: 100dvh;
+    /* The vignette: a faint warm projector glow up top, corners falling
+       off into black. */
+    background:
+      radial-gradient(ellipse 70% 50% at 50% 0%, rgb(240 180 76 / 0.05), transparent 70%),
+      radial-gradient(ellipse 120% 100% at 50% 45%, transparent 55%, rgb(0 0 0 / 0.4) 100%),
+      var(--color-bg);
+  }
+
+  ::selection {
+    background: rgb(240 180 76 / 0.3);
+    color: var(--color-text);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-marquee);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /*
+   * App shell: header across the top, the Turns rail on the left, the
+   * stage, and the input bar across the bottom. Fixed to the viewport.
+   */
+  .app-shell {
+    display: grid;
+    height: 100%;
+    grid-template-columns: 16rem minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      'header header'
+      'rail   stage'
+      'input  input';
+  }
+
+  /*
+   * Stage content: the answer panel and the poster panel side by side. It's
+   * a size container so the poster column can size itself from the height
+   * available: two rows of 2:3 posters, three across, fill the panel exactly
+   * when the column is (container height - the "Films" label row) wide --
+   * the padding and gaps cancel out. It never exceeds 42% of the width.
+   */
+  .stage-body {
+    container-type: size;
+    min-height: 0;
+  }
+
+  .stage-columns {
+    display: grid;
+    height: 100%;
+    gap: 1.25rem;
+    grid-template-columns: minmax(0, 1fr) min(42cqw, calc(100cqh - var(--poster-label-height)));
+    grid-template-rows: minmax(0, 1fr);
+    --poster-label-height: 2rem;
+  }
+
+  /* The only scroll region: thin, warm, and quiet until hovered. */
+  .scroll-panel {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-line-strong) transparent;
+  }
+  .scroll-panel:hover {
+    scrollbar-color: var(--color-faint) transparent;
+  }
+  .scroll-panel::-webkit-scrollbar {
+    width: 8px;
+  }
+  .scroll-panel::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scroll-panel::-webkit-scrollbar-thumb {
+    background: var(--color-line-strong);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  .scroll-panel:hover::-webkit-scrollbar-thumb {
+    background-color: var(--color-faint);
+  }
+
+  /* Below ~900px there's no real mobile layout yet: drop the rail so the
+     stage keeps its room, and let nothing overflow. */
+  @media (max-width: 900px) {
+    .app-shell {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-areas:
+        'header'
+        'stage'
+        'input';
+    }
+    .app-shell > [data-region='rail'] {
+      display: none;
+    }
+  }
+}
